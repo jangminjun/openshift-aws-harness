@@ -1,0 +1,107 @@
+[구현 현황 — harness/README.md의 "GPU monitoring / demo control-plane" 참고]
+- 구현됨: 시나리오 1의 감지+알림 부분 (DCGM 온도/XID PrometheusRule, Slack AlertmanagerConfig), Tier1/Tier2 Grafana 대시보드 뼈대 (`./harness.sh monitoring-all`)
+- 미구현: 시나리오 1의 자동 통제 액션(cordon/drain/pod kill), 시나리오 2~4(다운사이징, 우선순위 페널티, chargeback/quota), Green AI 전력 절감, 자동 종료
+
+---
+
+1. 프로젝트팀 관리 및 통제 모니터링 시나리오
+[시나리오 1] GPU 과열 및 하드웨어 장애 자동 대응 (Demonstration & Fault Tolerance)
+상황 및 시연: 특정 노드에서 과도한 연산 부하(gpu-burn 시연 등)로 인한 GPU 과열(85°C 초과) 또는 NVLink 통신 오류/XID 에러 발생.
+
+감지 조건:
+
+DCGM_FI_DEV_GPU_TEMP >= 85°C 지수 연속 상승
+
+DCGM_FI_DEV_XID_ERRORS != 0 발생
+
+인프라팀 통제 액션:
+
+Grafana 대시보드 경보 노란색/빨간색 전환 및 Slack/PagerDuty 자동 경보 발송.
+
+OpenShift GPU Operator가 해당 장애 노드를 Cordon & Drain 처리하여 신규 작업 할당 차단.
+
+과열의 원인이 되는 과부하 Pod를 인프라팀 정책에 의해 강제 종료(Kill) 처리하고 정상 노드로 작업 재배치.
+
+[시나리오 2] GPU 사양 오남용 및 워크로드 부적격 검출 (Workload Downsizing)
+상황: 프로젝트팀이 단순 추론(Inference) 서비스나 소규모 테스트 코드에 고가의 NVIDIA H100/A100(P4/P5) 인스턴스를 점유하여 사용.
+
+감지 조건:
+
+GPU 연산 패턴이 "추론(Inference)" 전용이거나, Tensor Core 활용도가 사양 대비 현저히 낮은 경우
+
+특정 프로젝트의 GPU 비용 대비 연산 효율 지표가 전체 평균 이하 지속
+
+인프라팀 통제 액션:
+
+인프라팀 직권으로 해당 워크로드를 보급형 GPU(G5/L4 등) 인스턴스로 강제 다운사이징 명령.
+
+미이행 시 인프라팀 권한으로 Pod를 마이그레이션 대상 노드로 강제 이동(Eviction).
+
+[시나리오 3] 비효율 코드 지적 및 스케줄링 제한 (Bad Code Penalty)
+상황: 프로젝트팀의 코드 미숙으로 Data Loader 병목이 발생하여 GPU가 주기적으로 놀고 있거나(Stall), HBM 메모리 락만 걸어두고 연산을 수행하지 않음.
+
+감지 조건:
+
+GPU Memory 이용률은 90% 이상이나, 연산 사용률(DCGM_FI_DEV_GPU_UTIL)이 주기적으로 0%로 떨어지는 시차 발생
+
+인프라팀 통제 액션:
+
+코드 개선 요청서 공식 발행: "인프라 자원 효율성 저해" 사유로 해당 프로젝트팀 리더에게 소명 요구.
+
+우선순위(PriorityClass) 하향: 코드 개선 전까지 해당 프로젝트팀의 작업 우선순위를 Low-Priority로 낮춰 타 팀 작업 발생 시 즉시 쫓겨나도록(Preemption) 설정.
+
+[시나리오 4] 프로젝트별 비용 초과(Chargeback) 및 Quota 통제 (Cost Management)
+상황: 월중 특정 프로젝트팀이 할당된 GPU-Hour 예산을 과다 소진하여 전사 인프라 예산 오버런 위험 발생.
+
+감지 조건:
+
+(할당된 GPU 수량) x (가동 시간) x (인스턴스 단가) 집계 결과가 중간 점검일 기준 목표 예산의 70% 초과
+
+인프라팀 통제 액션:
+
+OpenShift ResourceQuota를 조율하여 해당 팀이 동시 실행할 수 있는 최대 GPU 개수를 즉시 제한.
+
+야간 시간대나 남는 Spot 인스턴스에서만 작업이 구동되도록 Node affinity 정책 강제 변경.
+
+2. RHCOS 기반 GPU 전력 절감 시나리오 (Green AI)
+RHCOS(Red Hat Enterprise Linux CoreOS)의 불변성(Immutability) 특징을 활용하여 선언적으로 노드 및 GPU 전력을 통제합니다.
+
+1) Node Tuning Operator(NTO) 기반 CPU Power Profile
+RHCOS 노드의 Tuned Custom Resource를 설정하여 유휴 상태 CPU 전력 소비 제어.
+
+개발/테스트 노드는 powersave 프로필 적용, 운영 노드는 performance 프로필 유지.
+
+2) NVIDIA GPU Power Capping
+OpenShift GPU Operator 설정을 통해 노드 부팅 시 GPU의 최대 전력 한도(Power Limit) 제한.
+
+예시: A100/H100 GPU의 Power Limit을 약 20~25% 낮춰 적용하면, 성능 손실은 5~10% 수준에 그치나 전체 전력 소비 및 발열은 25% 이상 절감.
+
+3) Bare-metal / AWS Auto-Shutdown
+주말 및 야간 시간대 미사용 RHCOS 워커 노드를 완전히 종료(Scale to 0 또는 IPMI Power-Off)하여 불필요한 전력 소모 완전 차단.
+
+
+3. 인프라팀 통제권 강화를 위한 OpenShift/K8s 정책
+Strict ResourceQuota & LimitRange
+
+프로젝트팀의 Namespace별로 GPU 최대 할당량을 엄격히 제어하며, 추가 자원 필요 시 'GPU 확장 승인 신청서' 제출 프로세스 표준화.
+
+K8s PriorityClass & Preemption
+
+규정을 준수하는 우수 프로젝트팀 작업에는 High-Priority를, 규정 미준수 팀에는 Low-Priority를 부여하여 자원 부족 시 자동 자원 회수.
+
+Interactive Pod TTL (Time-To-Live) 적용
+
+Jupyter Notebook 등 개발용 Pod에 최대 8시간 유효기간을 부여하여 방치된 개발 환경 자동 삭제.
+
+4. Grafana 대시보드 구성 방안 (2-Tier)
+Tier 1: 인프라팀 전용 통제 대시보드 (Global View)
+Real-time Heatmap & Temperature Alert: 실시간 노드별 GPU 온도 및 발열 경보 시각화
+
+Hall of Shame (자원 낭비 Top 3 팀): 미사용 GPU 시간(Idle Hours)이 가장 긴 프로젝트팀 시각화
+
+Global GPU Utilization & Power: 전체 클러스터 총 전력 소비량 및 실시간 GPU 가동률
+
+Tier 2: 프로젝트팀 제공 대시보드 (Tenant View)
+My Project GPU Quota: 팀별 할당량 대비 현재 사용 현황
+
+GPU Memory/Util Deep-dive: Out of Memory(OOM) 경고 및 코드 병목 추이 분석

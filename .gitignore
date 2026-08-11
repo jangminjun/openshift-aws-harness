@@ -1,0 +1,5 @@
+AGENT.md
+.bastion_env
+harness/state/
+*.kubeconfig
+.DS_Store

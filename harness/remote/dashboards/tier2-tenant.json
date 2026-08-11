@@ -1,0 +1,109 @@
+{
+  "title": "GPU Control - Tier 2 (Project Team / Tenant View)",
+  "uid": "gpu-tier2-tenant",
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": { "from": "now-3h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "namespace",
+        "type": "query",
+        "datasource": "${DS_THANOS}",
+        "query": "label_values(DCGM_FI_DEV_GPU_UTIL, namespace)",
+        "refresh": 2,
+        "includeAll": false
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "My Project GPU Quota (requests.nvidia.com/gpu: used / hard)",
+      "type": "bargauge",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "min": 0 } },
+      "targets": [
+        {
+          "expr": "kube_resourcequota{namespace=\"$namespace\", resource=\"requests.nvidia.com/gpu\", type=\"used\"}",
+          "legendFormat": "used",
+          "datasource": "${DS_THANOS}"
+        },
+        {
+          "expr": "kube_resourcequota{namespace=\"$namespace\", resource=\"requests.nvidia.com/gpu\", type=\"hard\"}",
+          "legendFormat": "quota (hard)",
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "GPU Utilization per Pod",
+      "type": "timeseries",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 } },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_GPU_UTIL{namespace=\"$namespace\"}",
+          "legendFormat": "{{pod}} / gpu{{gpu}}",
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "GPU Memory Used per Pod",
+      "type": "timeseries",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "decmbytes" } },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_FB_USED{namespace=\"$namespace\"}",
+          "legendFormat": "{{pod}} / gpu{{gpu}}",
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Stall Pattern: High Memory, Low Compute (Bad Code Detector)",
+      "type": "timeseries",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "description": "Scenario 3: GPU Memory util >= 90% while GPU_UTIL drops to 0 periodically indicates a data-loader bottleneck.",
+      "fieldConfig": { "defaults": { "unit": "percent" } },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_MEM_COPY_UTIL{namespace=\"$namespace\"}",
+          "legendFormat": "{{pod}} mem_util",
+          "datasource": "${DS_THANOS}"
+        },
+        {
+          "expr": "DCGM_FI_DEV_GPU_UTIL{namespace=\"$namespace\"}",
+          "legendFormat": "{{pod}} gpu_util",
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "OOM / XID Events (this namespace)",
+      "type": "table",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_XID_ERRORS{namespace=\"$namespace\"} != 0",
+          "format": "table",
+          "instant": true,
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "version": 1
+}

@@ -1,0 +1,125 @@
+{
+  "title": "GPU Control - Tier 1 (Infra Global View)",
+  "uid": "gpu-tier1-global",
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": { "from": "now-3h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Real-time GPU Temperature by Node",
+      "type": "timeseries",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 75 },
+              { "color": "red", "value": 85 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_GPU_TEMP",
+          "legendFormat": "{{Hostname}} / gpu{{gpu}}",
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "XID Errors (5m increase)",
+      "type": "stat",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(DCGM_FI_DEV_XID_ERRORS[5m]))",
+          "legendFormat": "XID errors",
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Global GPU Utilization",
+      "type": "gauge",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "min": 0, "max": 100 }
+      },
+      "targets": [
+        {
+          "expr": "avg(DCGM_FI_DEV_GPU_UTIL)",
+          "legendFormat": "avg util",
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Total GPU Power Draw",
+      "type": "timeseries",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "watt" } },
+      "targets": [
+        {
+          "expr": "sum(DCGM_FI_DEV_POWER_USAGE)",
+          "legendFormat": "total watts",
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Hall of Shame - Lowest GPU Utilization by Namespace (Idle Candidates)",
+      "type": "table",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "targets": [
+        {
+          "expr": "bottomk(3, avg by (namespace) (DCGM_FI_DEV_GPU_UTIL))",
+          "format": "table",
+          "instant": true,
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Firing GPU Alerts",
+      "type": "table",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "targets": [
+        {
+          "expr": "ALERTS{alertstate=\"firing\", alertname=~\"GPUHighTemperature|GPUXidError\"}",
+          "format": "table",
+          "instant": true,
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "version": 1
+}
