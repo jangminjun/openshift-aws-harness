@@ -16,6 +16,8 @@
 #   gpu-operator                    install NFD + NVIDIA GPU Operator
 #   neuron-machineset                 add an AWS Neuron (Inferentia2/Trainium) worker MachineSet
 #   neuron-operator                     install KMM + AWS Neuron Operator + DeviceConfig
+#   cluster-autoscaler                    enable the cluster-wide ClusterAutoscaler (MAX_NODES_TOTAL)
+#   machine-autoscaler                      MachineAutoscaler for one MachineSet (MACHINESET_NAME/MIN_REPLICAS/MAX_REPLICAS)
 #   rhoai                              install OpenShift AI operator + DataScienceCluster
 #   enable-monitoring                    enable User Workload Monitoring + user Alertmanager config
 #   grafana                                install Grafana Operator + Thanos-querier datasource
@@ -202,6 +204,15 @@ cmd_neuron_operator() { ssh_bastion 'bash -s' < ./remote/neuron-operator.sh; }
 cmd_gpu_operator() { ssh_bastion 'bash -s' < ./remote/gpu-operator.sh; }
 cmd_rhoai()        { ssh_bastion 'bash -s' < ./remote/rhoai.sh; }
 
+cmd_cluster_autoscaler() {
+  ssh_bastion "MAX_NODES_TOTAL='${MAX_NODES_TOTAL:-20}' bash -s" < ./remote/cluster-autoscaler.sh
+}
+
+cmd_machine_autoscaler() {
+  ssh_bastion "MACHINESET_NAME='${MACHINESET_NAME:?set MACHINESET_NAME}' MIN_REPLICAS='${MIN_REPLICAS:?set MIN_REPLICAS}' \
+    MAX_REPLICAS='${MAX_REPLICAS:?set MAX_REPLICAS}' AUTOSCALER_NAME='${AUTOSCALER_NAME:-}' bash -s" < ./remote/machine-autoscaler.sh
+}
+
 cmd_enable_monitoring() {
   ssh_bastion "MONITORING_NAMESPACE='$MONITORING_NAMESPACE' bash -s" < ./remote/enable-monitoring.sh
 }
@@ -280,6 +291,8 @@ case "$cmd" in
   gpu-operator)                     cmd_gpu_operator ;;
   neuron-machineset)                  cmd_neuron_machineset ;;
   neuron-operator)                      cmd_neuron_operator ;;
+  cluster-autoscaler)                     cmd_cluster_autoscaler ;;
+  machine-autoscaler)                       cmd_machine_autoscaler ;;
   rhoai)                              cmd_rhoai ;;
   enable-monitoring)                    cmd_enable_monitoring ;;
   grafana)                                cmd_grafana ;;

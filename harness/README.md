@@ -49,6 +49,23 @@ cluster-wide, so it only needs to run once:
 GPU_INSTANCE_TYPE=g6.2xlarge GPU_MACHINESET_AZ=us-east-1a ./harness.sh gpu-machineset
 ```
 
+### Autoscaling GPU node pools
+
+IPI clusters already ship the cluster-autoscaler-operator, so this is just
+two CRs — no extra install:
+
+```bash
+./harness.sh cluster-autoscaler   # once per cluster (MAX_NODES_TOTAL, default 20)
+
+MACHINESET_NAME=myocp-77p88-gpu-worker-1a MIN_REPLICAS=1 MAX_REPLICAS=2 \
+  ./harness.sh machine-autoscaler   # once per MachineSet you want autoscaled
+```
+
+`AUTOSCALER_NAME` defaults to the MachineSet name with its
+`<cluster>-<id>-` prefix stripped; set it explicitly if you don't like the
+derived name. Find MachineSet names with `oc get machineset -n
+openshift-machine-api`.
+
 ### NPU (AWS Inferentia2 / Trainium via Neuron) — currently blocked, not wired into `all`
 
 **Status: tried and abandoned 2026-08-11.** `neuron-machineset` and
