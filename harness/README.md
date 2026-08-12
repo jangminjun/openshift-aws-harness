@@ -162,11 +162,25 @@ stack with a placeholder webhook in the `alertmanager-gpu-alertmanager`
 secret — just re-run `dcgm-alerts` with `SLACK_WEBHOOK_URL` set once you have
 a real one; no other step needs re-running.
 
-Only scenario 1 (GPU overheat/XID monitoring + alerting) and the Tier1/Tier2
-dashboard shells are wired up so far. Scenarios 2-4 (workload downsizing,
-bad-code penalty, chargeback/quota enforcement) and the power-saving /
-auto-shutdown pieces from the doc are not yet automated. A scenario 1 demo
-workload is available separately: `./harness.sh scenario1-demo` (see below).
+Only scenario 1 (GPU overheat/XID monitoring + alerting, per the doc's own
+numbering) and the Tier1/Tier2 dashboard shells are wired up so far.
+Scenarios 2-4 (workload downsizing, bad-code penalty, chargeback/quota
+enforcement) and the power-saving / auto-shutdown pieces from the doc are not
+yet automated.
+
+Two standalone demo workloads are available (numbered by presentation order,
+not the doc's scenario numbers above):
+
+```bash
+./harness.sh scenario1-autoscale-demo        # 2 training-job pods pinned to one GPU flavor -> MachineSet scale-out
+./harness.sh scenario1-autoscale-demo-stop
+./harness.sh scenario2-alert-demo            # gpu-burn pod -> Tier1 dashboard temp climb -> GPUHighTemperature -> Slack
+./harness.sh scenario2-alert-demo-stop
+```
+
+Equivalent standalone scripts also live directly on the bastion
+(`~/scenario1-autoscale-start.sh` / `-stop.sh`, `~/scenario2-alert-start.sh` /
+`-stop.sh`) for running without a local harness checkout mid-demo.
 
 ## Teardown
 

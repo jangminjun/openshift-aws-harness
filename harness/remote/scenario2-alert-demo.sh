@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Runs ON the bastion, after gpu-operator + monitoring-all. Stands up a demo
 # "project team" namespace and a gpu-burn pod that pegs a GPU at high
-# utilization/temperature — for exercising scenario 1 (overheat detection +
-# Slack alert) end to end against the dashboards built earlier. Idempotent.
+# utilization/temperature — scenario 2 (overheat detection + Slack alert),
+# exercised end to end against the dashboards + standalone alerting stack
+# built earlier. Idempotent.
 set -euo pipefail
 export KUBECONFIG="$HOME/ocp-install/auth/kubeconfig"
 
-DEMO_NAMESPACE="${DEMO_NAMESPACE:-gpu-scenario1-demo}"
+DEMO_NAMESPACE="${DEMO_NAMESPACE:-gpu-alert-scenario-2}"
 
 # docker.io/wilicc/gpu-burn (the usual go-to) is gated behind Docker Hub auth
 # now, so this stresses the GPU with a plain PyTorch matmul loop instead —

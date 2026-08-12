@@ -21,11 +21,13 @@
 #   rhoai                              install OpenShift AI operator + DataScienceCluster
 #   enable-monitoring                    enable User Workload Monitoring + user Alertmanager config
 #   grafana                                install Grafana Operator + Thanos-querier datasource
-#   dcgm-alerts                              GPU temp/XID PrometheusRule + Slack AlertmanagerConfig
+#   dcgm-alerts                              standalone Prometheus+Alertmanager for GPU temp/XID alerts -> Slack
 #   dashboards                                  apply Tier1 (infra) / Tier2 (tenant) Grafana dashboards
 #   monitoring-all                                enable-monitoring + grafana + dcgm-alerts + dashboards
-#   scenario1-demo                                  gpu-burn pod in a demo namespace (DEMO_NAMESPACE) to exercise scenario 1
-#   scenario1-demo-stop                               delete the gpu-burn demo pod
+#   scenario1-autoscale-demo                        2 training-job pods pinned to one GPU flavor -> MachineSet scale-out
+#   scenario1-autoscale-demo-stop                     delete the training-job demo pods
+#   scenario2-alert-demo                                gpu-burn pod in a demo namespace to exercise the overheat alert
+#   scenario2-alert-demo-stop                             delete the gpu-burn demo pod
 #   all                                    run the full cluster+GPU+RHOAI sequence, end to end
 #   destroy-cluster                          openshift-install destroy cluster
 #   destroy-bastion --yes                      tear down bastion + its network (destructive)
@@ -273,13 +275,22 @@ cmd_monitoring_all() {
   cmd_dashboards
 }
 
-cmd_scenario1_demo() {
-  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-scenario1-demo}' GPU_BURN_SECONDS='${GPU_BURN_SECONDS:-300}' \
-    bash -s" < ./remote/scenario1-demo.sh
+cmd_scenario1_autoscale_demo() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-autoscale-scenario-1}' INSTANCE_TYPE='${INSTANCE_TYPE:-g5.2xlarge}' \
+    bash -s" < ./remote/scenario1-autoscale-demo.sh
 }
 
-cmd_scenario1_demo_stop() {
-  ssh_bastion "export KUBECONFIG=~/ocp-install/auth/kubeconfig; oc delete pod gpu-burn -n '${DEMO_NAMESPACE:-gpu-scenario1-demo}' --ignore-not-found"
+cmd_scenario1_autoscale_demo_stop() {
+  ssh_bastion "export KUBECONFIG=~/ocp-install/auth/kubeconfig; oc delete pod training-job-1 training-job-2 -n '${DEMO_NAMESPACE:-gpu-autoscale-scenario-1}' --ignore-not-found"
+}
+
+cmd_scenario2_alert_demo() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-alert-scenario-2}' \
+    bash -s" < ./remote/scenario2-alert-demo.sh
+}
+
+cmd_scenario2_alert_demo_stop() {
+  ssh_bastion "export KUBECONFIG=~/ocp-install/auth/kubeconfig; oc delete pod gpu-burn -n '${DEMO_NAMESPACE:-gpu-alert-scenario-2}' --ignore-not-found"
 }
 
 cmd_destroy_cluster() {
@@ -341,8 +352,10 @@ case "$cmd" in
   dcgm-alerts)                              cmd_dcgm_alerts ;;
   dashboards)                                 cmd_dashboards ;;
   monitoring-all)                               cmd_monitoring_all ;;
-  scenario1-demo)                                 cmd_scenario1_demo ;;
-  scenario1-demo-stop)                              cmd_scenario1_demo_stop ;;
+  scenario1-autoscale-demo)                       cmd_scenario1_autoscale_demo ;;
+  scenario1-autoscale-demo-stop)                    cmd_scenario1_autoscale_demo_stop ;;
+  scenario2-alert-demo)                               cmd_scenario2_alert_demo ;;
+  scenario2-alert-demo-stop)                            cmd_scenario2_alert_demo_stop ;;
   destroy-cluster)                     cmd_destroy_cluster ;;
   destroy-bastion)                      cmd_destroy_bastion "$@" ;;
   all)                                    cmd_all ;;
