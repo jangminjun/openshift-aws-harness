@@ -79,7 +79,12 @@ done
 
 GPU_CSV=$(oc get csv -n nvidia-gpu-operator -o name | grep gpu-operator-certified | head -1)
 oc get "$GPU_CSV" -n nvidia-gpu-operator -o jsonpath='{.metadata.annotations.alm-examples}' \
-  | jq '.[] | select(.kind=="ClusterPolicy")' \
+  | jq '.[] | select(.kind=="ClusterPolicy")
+    # Without this, dcgm-exporter reports which pod/namespace is actually
+    # using each GPU, but Prometheus service-discovery labels (pod/namespace
+    # = the exporter itself) silently win the collision and overwrite it —
+    # breaking per-tenant attribution in Tier2 dashboards and Slack alerts.
+    | .spec.dcgmExporter.serviceMonitor.honorLabels = true' \
   | oc apply -f -
 
 echo "NFD + NVIDIA GPU Operator submitted. Check with: oc get pods -n nvidia-gpu-operator"

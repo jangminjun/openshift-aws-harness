@@ -36,6 +36,15 @@ for _ in $(seq 1 40); do
   sleep 15
 done
 
+# CSV Succeeded doesn't guarantee the CRDs it ships are registered in the API
+# server's discovery cache yet; wait for that separately or the Grafana CR
+# apply below races it ("no matches for kind Grafana").
+echo "Waiting for Grafana CRD to register..."
+for _ in $(seq 1 20); do
+  oc get crd grafanas.grafana.integreatly.org >/dev/null 2>&1 && break
+  sleep 5
+done
+
 oc apply -f - <<YAML
 apiVersion: v1
 kind: ServiceAccount
@@ -62,6 +71,24 @@ oc create secret generic grafana-thanos-token -n "$MONITORING_NAMESPACE" \
   --from-literal=authHeader="Bearer ${TOKEN}" \
   --dry-run=client -o yaml | oc apply -f -
 
+# Grafana's own dashboard/org/user DB (SQLite) lives on the operator's
+# default "grafana-data" volume, which is emptyDir unless overridden here —
+# any pod restart (rollout, node drain, ...) silently wipes it. Back it with
+# a PVC instead so dashboards survive restarts.
+oc apply -f - <<YAML
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gpu-grafana-data
+  namespace: ${MONITORING_NAMESPACE}
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+YAML
+
 oc apply -f - <<YAML
 apiVersion: grafana.integreatly.org/v1beta1
 kind: Grafana
@@ -78,6 +105,14 @@ spec:
     spec:
       tls:
         termination: edge
+  deployment:
+    spec:
+      template:
+        spec:
+          volumes:
+          - name: grafana-data
+            persistentVolumeClaim:
+              claimName: gpu-grafana-data
 YAML
 
 echo "Waiting for Grafana instance to become ready..."
@@ -107,13 +142,11 @@ spec:
       tlsSkipVerify: true
       httpHeaderName1: Authorization
     secureJsonData:
-      httpHeaderValue1: ""
-  valuesFrom:
-  - targetPath: "secureJsonData.httpHeaderValue1"
-    valueFrom:
-      secretKeyRef:
-        name: grafana-thanos-token
-        key: authHeader
+      # valuesFrom (secretKeyRef into secureJsonData) silently resolves to an
+      # empty value on this grafana-operator version — no error anywhere, the
+      # datasource just ends up with secureJsonFields: {} and every query
+      # 401s. Inlining the token here avoids that indirection entirely.
+      httpHeaderValue1: "Bearer ${TOKEN}"
 YAML
 
 ROUTE=$(oc get route gpu-grafana-route -n "$MONITORING_NAMESPACE" -o jsonpath='{.spec.host}' 2>/dev/null || echo "(route not ready yet)")

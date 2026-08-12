@@ -6,11 +6,93 @@
   "time": { "from": "now-3h", "to": "now" },
   "panels": [
     {
+      "id": 100,
+      "title": "Fleet Overview",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
       "id": 1,
+      "title": "GPU Nodes Online",
+      "type": "stat",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
+      "targets": [
+        {
+          "expr": "count(kube_node_status_capacity{resource=\"nvidia_com_gpu\"} > 0)",
+          "legendFormat": "nodes",
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Total GPUs (Capacity)",
+      "type": "stat",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 1 },
+      "targets": [
+        {
+          "expr": "sum(kube_node_status_capacity{resource=\"nvidia_com_gpu\"})",
+          "legendFormat": "GPUs",
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "GPUs Allocated",
+      "type": "stat",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 1 },
+      "description": "Sum of requests.nvidia.com/gpu across all pods. Gap vs. Total GPUs = idle capacity (scenario 2/4 candidates).",
+      "targets": [
+        {
+          "expr": "sum(kube_pod_container_resource_requests{resource=\"nvidia_com_gpu\"}) OR on() vector(0)",
+          "legendFormat": "allocated",
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Avg GPU Temperature",
+      "type": "stat",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 75 },
+              { "color": "red", "value": 85 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "avg(DCGM_FI_DEV_GPU_TEMP)",
+          "legendFormat": "avg temp",
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 101,
+      "title": "Temperature & Hardware Faults",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 }
+    },
+    {
+      "id": 5,
       "title": "Real-time GPU Temperature by Node",
       "type": "timeseries",
       "datasource": "${DS_THANOS}",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 7 },
       "fieldConfig": {
         "defaults": {
           "unit": "celsius",
@@ -33,11 +115,11 @@
       ]
     },
     {
-      "id": 2,
-      "title": "XID Errors (5m increase)",
+      "id": 6,
+      "title": "XID Errors (5m)",
       "type": "stat",
       "datasource": "${DS_THANOS}",
-      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 8 },
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 7 },
       "fieldConfig": {
         "defaults": {
           "thresholds": {
@@ -58,11 +140,58 @@
       ]
     },
     {
-      "id": 3,
+      "id": 7,
+      "title": "PCIe Replay Errors (5m)",
+      "type": "stat",
+      "datasource": "${DS_THANOS}",
+      "description": "Link-level retransmits. Rising counts point at a degrading PCIe/NVLink connection ahead of a hard XID fault.",
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 11 },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(DCGM_FI_DEV_PCIE_REPLAY_COUNTER[5m]))",
+          "legendFormat": "PCIe replays",
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "GPU Memory Temperature by Node",
+      "type": "timeseries",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 15 },
+      "fieldConfig": { "defaults": { "unit": "celsius" } },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_MEMORY_TEMP",
+          "legendFormat": "{{Hostname}} / gpu{{gpu}}",
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 102,
+      "title": "Utilization & Compute Efficiency",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 21 }
+    },
+    {
+      "id": 9,
       "title": "Global GPU Utilization",
       "type": "gauge",
       "datasource": "${DS_THANOS}",
-      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 8 },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 22 },
       "fieldConfig": {
         "defaults": { "unit": "percent", "min": 0, "max": 100 }
       },
@@ -75,11 +204,75 @@
       ]
     },
     {
-      "id": 4,
+      "id": 10,
+      "title": "GPU Utilization by Node",
+      "type": "timeseries",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 6, "w": 18, "x": 6, "y": 22 },
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "min": 0, "max": 100 }
+      },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_GPU_UTIL",
+          "legendFormat": "{{Hostname}} / gpu{{gpu}}",
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Tensor Core Active %",
+      "type": "timeseries",
+      "datasource": "${DS_THANOS}",
+      "description": "Scenario 2 signal: sustained low tensor-core activity on a high-end GPU flags an inference/test workload that doesn't need it.",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 28 },
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "min": 0, "max": 100 }
+      },
+      "targets": [
+        {
+          "expr": "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE * 100",
+          "legendFormat": "{{Hostname}} / gpu{{gpu}}",
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "GPU Compute vs Memory Utilization (Cluster Avg)",
+      "type": "timeseries",
+      "datasource": "${DS_THANOS}",
+      "description": "Scenario 3 signal: memory util staying high while compute util periodically drops to 0 indicates a data-loader stall (bad code candidate).",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 28 },
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "min": 0, "max": 100 }
+      },
+      "targets": [
+        {
+          "expr": "avg(DCGM_FI_DEV_GPU_UTIL)",
+          "legendFormat": "compute util (avg)",
+          "datasource": "${DS_THANOS}"
+        },
+        {
+          "expr": "avg(DCGM_FI_DEV_MEM_COPY_UTIL)",
+          "legendFormat": "memory util (avg)",
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 103,
+      "title": "Power & Memory Capacity",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 }
+    },
+    {
+      "id": 13,
       "title": "Total GPU Power Draw",
       "type": "timeseries",
       "datasource": "${DS_THANOS}",
-      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 8 },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 36 },
       "fieldConfig": { "defaults": { "unit": "watt" } },
       "targets": [
         {
@@ -90,11 +283,67 @@
       ]
     },
     {
-      "id": 5,
+      "id": 14,
+      "title": "Power Draw per GPU",
+      "type": "timeseries",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 36 },
+      "fieldConfig": { "defaults": { "unit": "watt" } },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_POWER_USAGE",
+          "legendFormat": "{{Hostname}} / gpu{{gpu}}",
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "title": "GPU Framebuffer Memory Used / Free",
+      "type": "timeseries",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 36 },
+      "fieldConfig": { "defaults": { "unit": "decmbytes" } },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_FB_USED",
+          "legendFormat": "{{Hostname}} / gpu{{gpu}} used",
+          "datasource": "${DS_THANOS}"
+        },
+        {
+          "expr": "DCGM_FI_DEV_FB_FREE",
+          "legendFormat": "{{Hostname}} / gpu{{gpu}} free",
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 104,
+      "title": "Fleet Inventory & Waste Detection",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 42 }
+    },
+    {
+      "id": 16,
+      "title": "GPU Node Inventory (model, temp)",
+      "type": "table",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 8, "w": 14, "x": 0, "y": 43 },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_GPU_TEMP",
+          "format": "table",
+          "instant": true,
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 17,
       "title": "Hall of Shame - Lowest GPU Utilization by Namespace (Idle Candidates)",
       "type": "table",
       "datasource": "${DS_THANOS}",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "gridPos": { "h": 8, "w": 10, "x": 14, "y": 43 },
       "targets": [
         {
           "expr": "bottomk(3, avg by (namespace) (DCGM_FI_DEV_GPU_UTIL))",
@@ -105,11 +354,17 @@
       ]
     },
     {
-      "id": 6,
+      "id": 105,
+      "title": "Alerts",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 51 }
+    },
+    {
+      "id": 18,
       "title": "Firing GPU Alerts",
       "type": "table",
       "datasource": "${DS_THANOS}",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 52 },
       "targets": [
         {
           "expr": "ALERTS{alertstate=\"firing\", alertname=~\"GPUHighTemperature|GPUXidError\"}",

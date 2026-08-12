@@ -136,29 +136,37 @@ Grafana dashboards, and GPU temp/XID alerts routed to Slack. Requires
 
 ```bash
 SLACK_WEBHOOK_URL='https://hooks.slack.com/services/...' \
-  SLACK_CHANNEL='#gpu-alerts' ./harness.sh monitoring-all
+  SLACK_CHANNEL='#alarm-gpu-monitoring' ./harness.sh monitoring-all
 
 # or step by step:
-./harness.sh enable-monitoring   # turn on User Workload Monitoring + user AlertmanagerConfig
+./harness.sh enable-monitoring   # turn on User Workload Monitoring (used for dashboard queries)
 ./harness.sh grafana             # Grafana Operator + datasource against Thanos Querier
-./harness.sh dcgm-alerts         # PrometheusRule (temp>=85C, XID errors) + Slack routing
+./harness.sh dcgm-alerts         # standalone Prometheus + Alertmanager (temp>=70C, XID errors) + Slack routing
 ./harness.sh dashboards          # Tier1 global + Tier2 per-namespace Grafana dashboards
 ```
 
-If `SLACK_WEBHOOK_URL` is left empty, `dcgm-alerts` still creates the
-PrometheusRule + AlertmanagerConfig + a placeholder `slack-webhook` secret —
-update that secret later to turn on real delivery, no other step needs
-re-running:
+**`dcgm-alerts` runs its own Prometheus + Alertmanager**, installed via a
+second, separately-scoped community Prometheus Operator subscription in
+`gpu-monitoring` — not OpenShift's own User Workload Monitoring (UWM). UWM's
+tenant isolation (`enforcedNamespaceLabel` on rules, `OnNamespace` matching on
+Alertmanager routes, neither overridable from the ConfigMap on this cluster
+and not durable via direct CR patch — `cluster-monitoring-operator` reverts
+it on resync) requires every alert to belong to exactly one namespace, which
+a fleet-wide "any GPU overheating" alert never satisfies. The standalone
+stack sidesteps that entirely instead of fighting it. See the comment block
+at the top of `remote/dcgm-alerts.sh` for the full story. Dashboards still
+read through UWM/Thanos Querier as before — only alerting was moved.
 
-```bash
-oc create secret generic slack-webhook -n gpu-monitoring \
-  --from-literal=url=<real-webhook> --dry-run=client -o yaml | oc apply -f -
-```
+If `SLACK_WEBHOOK_URL` is left empty, `dcgm-alerts` still stands up the whole
+stack with a placeholder webhook in the `alertmanager-gpu-alertmanager`
+secret — just re-run `dcgm-alerts` with `SLACK_WEBHOOK_URL` set once you have
+a real one; no other step needs re-running.
 
 Only scenario 1 (GPU overheat/XID monitoring + alerting) and the Tier1/Tier2
 dashboard shells are wired up so far. Scenarios 2-4 (workload downsizing,
 bad-code penalty, chargeback/quota enforcement) and the power-saving /
-auto-shutdown pieces from the doc are not yet automated.
+auto-shutdown pieces from the doc are not yet automated. A scenario 1 demo
+workload is available separately: `./harness.sh scenario1-demo` (see below).
 
 ## Teardown
 

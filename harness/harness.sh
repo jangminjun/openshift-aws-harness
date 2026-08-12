@@ -24,6 +24,8 @@
 #   dcgm-alerts                              GPU temp/XID PrometheusRule + Slack AlertmanagerConfig
 #   dashboards                                  apply Tier1 (infra) / Tier2 (tenant) Grafana dashboards
 #   monitoring-all                                enable-monitoring + grafana + dcgm-alerts + dashboards
+#   scenario1-demo                                  gpu-burn pod in a demo namespace (DEMO_NAMESPACE) to exercise scenario 1
+#   scenario1-demo-stop                               delete the gpu-burn demo pod
 #   all                                    run the full cluster+GPU+RHOAI sequence, end to end
 #   destroy-cluster                          openshift-install destroy cluster
 #   destroy-bastion --yes                      tear down bastion + its network (destructive)
@@ -271,6 +273,15 @@ cmd_monitoring_all() {
   cmd_dashboards
 }
 
+cmd_scenario1_demo() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-scenario1-demo}' GPU_BURN_SECONDS='${GPU_BURN_SECONDS:-300}' \
+    bash -s" < ./remote/scenario1-demo.sh
+}
+
+cmd_scenario1_demo_stop() {
+  ssh_bastion "export KUBECONFIG=~/ocp-install/auth/kubeconfig; oc delete pod gpu-burn -n '${DEMO_NAMESPACE:-gpu-scenario1-demo}' --ignore-not-found"
+}
+
 cmd_destroy_cluster() {
   ssh_bastion 'export PATH=$PATH:/usr/local/bin; cd ~/ocp-install && openshift-install destroy cluster --dir=. --log-level=info'
 }
@@ -330,6 +341,8 @@ case "$cmd" in
   dcgm-alerts)                              cmd_dcgm_alerts ;;
   dashboards)                                 cmd_dashboards ;;
   monitoring-all)                               cmd_monitoring_all ;;
+  scenario1-demo)                                 cmd_scenario1_demo ;;
+  scenario1-demo-stop)                              cmd_scenario1_demo_stop ;;
   destroy-cluster)                     cmd_destroy_cluster ;;
   destroy-bastion)                      cmd_destroy_bastion "$@" ;;
   all)                                    cmd_all ;;
