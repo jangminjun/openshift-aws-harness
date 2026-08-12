@@ -51,8 +51,22 @@ GPU_INSTANCE_TYPE=g6.2xlarge GPU_MACHINESET_AZ=us-east-1a ./harness.sh gpu-machi
 
 ### Autoscaling GPU node pools
 
+`gpu-machineset` wires up autoscaling automatically: it applies the
+cluster-wide `ClusterAutoscaler` singleton (idempotent, so this only really
+takes effect the first time) and a `MachineAutoscaler` for the GPU
+MachineSet it just created (or already found), bounded by `GPU_MIN_REPLICAS`
+/ `GPU_MAX_REPLICAS` (default `1`/`2`). No extra steps needed:
+
+```bash
+GPU_INSTANCE_TYPE=g6.2xlarge GPU_MACHINESET_AZ=us-east-1a \
+  GPU_MIN_REPLICAS=1 GPU_MAX_REPLICAS=2 ./harness.sh gpu-machineset
+```
+
 IPI clusters already ship the cluster-autoscaler-operator, so this is just
-two CRs — no extra install:
+CRs — no extra install. The autoscaler name is derived from the MachineSet
+name with its `<cluster>-<id>-` prefix stripped. For non-GPU MachineSets
+(or to override bounds after the fact), use the two underlying CRs
+directly:
 
 ```bash
 ./harness.sh cluster-autoscaler   # once per cluster (MAX_NODES_TOTAL, default 20)

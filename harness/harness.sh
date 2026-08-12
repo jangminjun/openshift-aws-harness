@@ -220,7 +220,9 @@ cmd_kubeconfig() {
 
 cmd_gpu_machineset() {
   ssh_bastion "GPU_INSTANCE_TYPE='$GPU_INSTANCE_TYPE' GPU_REPLICAS='$GPU_REPLICAS' \
-    GPU_MACHINESET_AZ='$GPU_MACHINESET_AZ' bash -s" < ./remote/gpu-machineset.sh
+    GPU_MACHINESET_AZ='$GPU_MACHINESET_AZ' GPU_MIN_REPLICAS='$GPU_MIN_REPLICAS' \
+    GPU_MAX_REPLICAS='$GPU_MAX_REPLICAS' MAX_NODES_TOTAL='$MAX_NODES_TOTAL' \
+    bash -s" < ./remote/gpu-machineset.sh
 }
 
 cmd_neuron_machineset() {
