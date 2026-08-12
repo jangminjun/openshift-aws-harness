@@ -1,10 +1,11 @@
 # GPU 데모 시나리오
 
 `myocp` 클러스터(OpenShift + OpenShift AI + GPU Operator + 모니터링 스택)가 이미
-구축되어 있다는 전제 하에, 고객 데모용으로 준비된 두 시나리오를 순서대로 정리한
+구축되어 있다는 전제 하에, 고객 데모용으로 준비된 시나리오들을 순서대로 정리한
 문서입니다. 번호는 **발표 순서** 기준이며, `openshift-monitoring` 문서 자체의
 시나리오 번호(1: 과열/장애, 2: GPU 오남용, 3: 비효율 코드, 4: Chargeback)와는
-다릅니다 — 이 데모의 "시나리오 2(알람)"가 문서상으로는 "시나리오 1"에 해당합니다.
+다릅니다 — 이 데모의 "시나리오 2(알람)"가 문서상으로는 "시나리오 1"에 해당하고,
+"시나리오 3(Power Capping)"은 문서의 별도 섹션인 "Green AI"에 해당합니다.
 
 실행은 두 가지 방법 모두 가능합니다:
 - 로컬에서 `./harness.sh <command>` (harness 체크아웃 + AWS 프로필 필요)
@@ -110,6 +111,54 @@ resolved 메시지가 갑니다.
 
 ---
 
+## 시나리오 3 — GPU Power Capping (Green AI)
+
+> **상태: 스크립트만 작성됨, 캡핑 적용 후 그래프 하락까지는 아직 실측 검증 전.**
+> 다음 세션에서 `scenario3-powercap-apply.sh`부터 이어서 확인할 것.
+
+**보여주는 것**: GPU 전력 상한을 낮추면, 성능 손실은 적은데 전력 소비는 크게
+줄어드는 걸 대시보드에서 실시간으로 보여준다 (원리는 위 "Green AI" 절 참고).
+
+**구성**:
+- `power-load` pod가 PyTorch 행렬곱을 무한 반복하며 GPU를 100% 사용 (g6.2xlarge,
+  NVIDIA L4 — 기본/최대 전력 한도 72W, 최소 40W로 실측 확인됨)
+- 워크로드가 뜬 노드의 `nvidia-driver-daemonset` pod 안에서 `nvidia-smi -pl`로
+  전력 상한을 조정
+- Grafana Tier1 "Power Draw per GPU" 패널에서 즉시 하락 확인 가능 (다음 스크레이프
+  주기 ~30초 이내)
+
+**실행** (bastion에서):
+```bash
+~/scenario3-powercap-start.sh              # power-load pod 배포, 72W 풀로드까지 대기
+~/scenario3-powercap-apply.sh 50           # 50W로 캡핑 (72W 대비 약 30% 절감)
+~/scenario3-powercap-apply.sh              # 인자 없이 실행하면 기본값(72W)으로 리셋
+~/scenario3-powercap-stop.sh               # pod 삭제 + 전력 한도 리셋
+```
+
+**실측된 것**: `power-load` 기동 후 30초 만에 `power.draw`가 72.00W(최대치)까지
+꽉 참 — 캡핑 전 베이스라인은 확인 완료. `-pl 50` 적용 후 실제로 그래프가
+떨어지는지, 성능(행렬곱 처리량)이 얼마나 줄어드는지는 **아직 실측하지 않음**.
+
+**아직 검증/보완이 필요한 것**:
+- `nvidia-smi -pl` 적용 후 실제 `power.draw` 하락폭 확인
+- Grafana 패널에 반영되는 데 걸리는 시간 확인
+- harness 레포(`remote/scenario3-*.sh`, `harness.sh` 커맨드)에는 아직 미반영 —
+  지금은 bastion(`~/scenario3-powercap-*.sh`)에만 존재
+
+---
+
+## 아이디어 — GPU 장애 시나리오 (미착수)
+
+사용자 제안: 실제 GPU 하드웨어 장애(XID 에러 등)가 발생했을 때의 대응을 보여주는
+시나리오. 문서 [시나리오 1]의 "인프라팀 통제 액션"(cordon & drain, 과부하 pod
+강제 종료)과 맞닿아 있음 — 앞서 논의했던 "알람 발동 시 pod kill" 아이디어와도
+연결 지점이 있다. 다음 세션에서 설계 이어갈 것. 후보 방향:
+- XID 에러를 인위적으로 유발하는 방법 확보 (실제 하드웨어 결함을 소프트웨어로
+  재현하기 까다로움 — nvidia-smi로 강제 유발 가능한지 확인 필요)
+- 또는 노드를 강제로 `NotReady`로 만들어서 "장애 노드 격리" 흐름만 보여주는 방식
+
+---
+
 ## 미구현 시나리오 (참고용, `openshift-monitoring` 문서 원본 번호 기준)
 
 아래는 아직 harness에 자동화되어 있지 않은 시나리오들입니다. 감지 조건과
@@ -149,9 +198,20 @@ RHCOS(Red Hat Enterprise Linux CoreOS)의 불변성(Immutability)을 활용해
 1. **Node Tuning Operator(NTO) 기반 CPU Power Profile** — RHCOS 노드의 Tuned
    Custom Resource로 유휴 상태 CPU 전력 소비 제어. 개발/테스트 노드는
    `powersave` 프로필, 운영 노드는 `performance` 프로필 유지.
-2. **NVIDIA GPU Power Capping** — GPU Operator 설정으로 노드 부팅 시 GPU
-   최대 전력 한도(Power Limit) 제한. 예: A100/H100의 Power Limit을 20~25%
-   낮추면 성능 손실은 5~10% 수준인데 전력 소비/발열은 25% 이상 절감.
+2. **NVIDIA GPU Power Capping** — GPU가 최대로 끌어쓸 수 있는 전력(Watt)에
+   상한선을 거는 것. `nvidia-smi -i 0 -pl <watt>` 명령(또는 이걸 노드 부팅 시
+   자동 실행하는 DaemonSet)으로 설정한다.
+   - **왜 되는가**: GPU는 부하가 걸리면 클럭을 최대한 올려서(부스트) 성능을
+     짜내는데, 이때 소비 전력은 클럭의 세제곱에 가깝게 급증한다. 반면 성능은
+     그보다 훨씬 완만하게 늘어난다 — 즉 최상위 부스트 구간은 "전력 대비
+     성능 효율이 가장 나쁜 구간"이다. 여기를 깎아내면 전력은 크게, 성능은
+     적게 줄어든다.
+   - **구체적인 예시**: GPU 전력 한도를 400W에서 300W로 낮췄다고 하면
+     - 전력 절감폭: (400 − 300) ÷ 400 = **25% 감소**
+     - 이때 실측 성능 손실은 25%가 아니라 **5%에서 10% 사이**에 그친다
+     - 즉 "전력은 25% 줄었는데 성능은 5~10%만 줄었다" — 전력 절감폭이 성능
+       손실폭보다 훨씬 커서 이득이라는 뜻. (참고: "5~10%"의 물결표 `~`는
+       "5%부터 10% 사이"라는 범위 표기다.)
 3. **Bare-metal / AWS Auto-Shutdown** — 주말·야간 시간대 미사용 RHCOS 워커
    노드를 완전 종료(Scale to 0 또는 IPMI Power-Off)해서 불필요한 전력 소모
    완전 차단.
