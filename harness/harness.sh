@@ -43,7 +43,7 @@ cmd_bastion_up() {
   aws ec2 describe-key-pairs --key-names "${CLUSTER_NAME}-bastion-key" --region "$AWS_REGION" >/dev/null 2>&1 || {
     [ -f "${SSH_KEY_PATH}" ] || { mkdir -p "$(dirname "$SSH_KEY_PATH")"; ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -C "${CLUSTER_NAME}-bastion" -q; }
     aws ec2 import-key-pair --key-name "${CLUSTER_NAME}-bastion-key" \
-      --public-key-material "fileb://${SSH_KEY_PATH}.pub" --region "$AWS_REGION" >/dev/null
+      --public-key-material "fileb://$(native_path "${SSH_KEY_PATH}.pub")" --region "$AWS_REGION" >/dev/null
     log "Imported key pair ${CLUSTER_NAME}-bastion-key"
   }
 
@@ -110,7 +110,10 @@ cmd_bastion_up() {
         --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null)" != "running" ] && \
      [ "$(aws ec2 describe-instances --instance-ids "${INSTANCE_ID:-x}" --region "$AWS_REGION" \
         --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null)" != "pending" ]; then
-    AMI_ID=$(aws ssm get-parameter --name "$BASTION_AMI_SSM_PARAM" --query 'Parameter.Value' --output text --region "$AWS_REGION")
+    AMI_ID=$(aws ec2 describe-images --owners amazon \
+      --filters "Name=name,Values=${BASTION_AMI_NAME_FILTER}" "Name=state,Values=available" \
+      --query 'sort_by(Images,&CreationDate)[-1].ImageId' --output text --region "$AWS_REGION")
+    [ -n "$AMI_ID" ] && [ "$AMI_ID" != "None" ] || err "No AMI found matching '${BASTION_AMI_NAME_FILTER}' in ${AWS_REGION}"
     INSTANCE_ID=$(aws ec2 run-instances --image-id "$AMI_ID" --instance-type "$BASTION_INSTANCE_TYPE" \
       --key-name "${CLUSTER_NAME}-bastion-key" --subnet-id "$SUBNET_ID" --security-group-ids "$SG_ID" \
       --associate-public-ip-address \
@@ -132,7 +135,33 @@ cmd_bastion_up() {
   wait_for_ssh
 }
 
-cmd_bastion_bootstrap() { ssh_bastion 'bash -s' < ./remote/bootstrap.sh; }
+cmd_bastion_bootstrap() {
+  ssh_bastion 'bash -s' < ./remote/bootstrap.sh
+  cmd_push_aws_credentials
+}
+
+# openshift-install (run on the bastion) needs AWS creds of its own to
+# provision infra; forward the resolved key/secret from AWS_PROFILE (or the
+# default chain) rather than assuming an instance profile is attached.
+cmd_push_aws_credentials() {
+  local profile_args=()
+  [ -n "$AWS_PROFILE" ] && profile_args=(--profile "$AWS_PROFILE")
+  local key secret
+  key=$(aws configure get aws_access_key_id "${profile_args[@]}")
+  secret=$(aws configure get aws_secret_access_key "${profile_args[@]}")
+  [ -n "$key" ] && [ -n "$secret" ] || err "Could not resolve AWS credentials locally (AWS_PROFILE='${AWS_PROFILE}')"
+  ssh_bastion "mkdir -p ~/.aws && chmod 700 ~/.aws && cat > ~/.aws/credentials && chmod 600 ~/.aws/credentials" <<EOF
+[default]
+aws_access_key_id = ${key}
+aws_secret_access_key = ${secret}
+EOF
+  ssh_bastion "cat > ~/.aws/config" <<EOF
+[default]
+region = ${AWS_REGION}
+output = json
+EOF
+  log "Pushed AWS credentials to bastion (~/.aws/credentials)"
+}
 
 cmd_push_pull_secret() {
   local src="${1:-$PULL_SECRET_FILE}"

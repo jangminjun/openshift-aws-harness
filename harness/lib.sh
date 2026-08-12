@@ -1,4 +1,8 @@
 HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# On Git Bash/MSYS, the AWS CLI (a native Windows exe) can't resolve MSYS-style
+# /c/... paths passed inside fileb:// paramfile URLs; convert to C:/... there.
+native_path() { command -v cygpath >/dev/null 2>&1 && cygpath -m "$1" || printf '%s' "$1"; }
 STATE_FILE="${HARNESS_DIR}/state/${CLUSTER_NAME}.env"
 
 log()  { printf '\033[1;34m[harness]\033[0m %s\n' "$*" >&2; }
@@ -34,7 +38,8 @@ aws_tagged_id() {
 ssh_bastion() {
   load_state
   require_state PUBLIC_IP
-  ssh -o StrictHostKeyChecking=accept-new -i "$SSH_KEY_PATH" "ec2-user@${PUBLIC_IP}" "$@"
+  ssh -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=6 \
+    -i "$SSH_KEY_PATH" "ec2-user@${PUBLIC_IP}" "$@"
 }
 
 scp_to_bastion() {
