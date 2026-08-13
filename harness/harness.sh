@@ -151,8 +151,8 @@ cmd_push_aws_credentials() {
   local profile_args=()
   [ -n "$AWS_PROFILE" ] && profile_args=(--profile "$AWS_PROFILE")
   local key secret
-  key=$(aws configure get aws_access_key_id "${profile_args[@]}")
-  secret=$(aws configure get aws_secret_access_key "${profile_args[@]}")
+  key=$(aws configure get aws_access_key_id "${profile_args[@]+"${profile_args[@]}"}")
+  secret=$(aws configure get aws_secret_access_key "${profile_args[@]+"${profile_args[@]}"}")
   [ -n "$key" ] && [ -n "$secret" ] || err "Could not resolve AWS credentials locally (AWS_PROFILE='${AWS_PROFILE}')"
   ssh_bastion "mkdir -p ~/.aws && chmod 700 ~/.aws && cat > ~/.aws/credentials && chmod 600 ~/.aws/credentials" <<EOF
 [default]
