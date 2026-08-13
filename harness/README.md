@@ -168,7 +168,7 @@ Scenarios 2-4 (workload downsizing, bad-code penalty, chargeback/quota
 enforcement) and the power-saving / auto-shutdown pieces from the doc are not
 yet automated.
 
-Two standalone demo workloads are available (numbered by presentation order,
+Three standalone demo workloads are available (numbered by presentation order,
 not the doc's scenario numbers above):
 
 ```bash
@@ -176,11 +176,16 @@ not the doc's scenario numbers above):
 ./harness.sh scenario1-autoscale-demo-stop
 ./harness.sh scenario2-alert-demo            # gpu-burn pod -> Tier1 dashboard temp climb -> GPUHighTemperature -> Slack
 ./harness.sh scenario2-alert-demo-stop
+./harness.sh scenario3-powercap-start        # provisions g6.2xlarge, power-load pod at full (72W) draw
+./harness.sh scenario3-powercap-apply 50     # nvidia-smi -pl 50 on the power-load node -> Tier1 "Power Draw per GPU" drops
+./harness.sh scenario3-powercap-apply        # no arg = reset to the card default power limit
+./harness.sh scenario3-powercap-stop         # delete the pod, reset power limit to default
 ```
 
 Equivalent standalone scripts also live directly on the bastion
 (`~/scenario1-autoscale-start.sh` / `-stop.sh`, `~/scenario2-alert-start.sh` /
-`-stop.sh`) for running without a local harness checkout mid-demo.
+`-stop.sh`, `~/scenario3-powercap-start.sh` / `-apply.sh` / `-stop.sh`) for
+running without a local harness checkout mid-demo.
 
 ## Teardown
 

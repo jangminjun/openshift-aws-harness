@@ -28,6 +28,9 @@
 #   scenario1-autoscale-demo-stop                     delete the training-job demo pods
 #   scenario2-alert-demo                                gpu-burn pod in a demo namespace to exercise the overheat alert
 #   scenario2-alert-demo-stop                             delete the gpu-burn demo pod
+#   scenario3-powercap-start                                provisions g6.2xlarge, deploys power-load pod at full power draw
+#   scenario3-powercap-apply [watts]                          nvidia-smi -pl on the power-load node (no arg = reset to default)
+#   scenario3-powercap-stop                                     delete the power-load pod, reset power limit to default
 #   all                                    run the full cluster+GPU+RHOAI sequence, end to end
 #   destroy-cluster                          openshift-install destroy cluster
 #   destroy-bastion --yes                      tear down bastion + its network (destructive)
@@ -293,6 +296,33 @@ cmd_scenario2_alert_demo_stop() {
   ssh_bastion "export KUBECONFIG=~/ocp-install/auth/kubeconfig; oc delete pod gpu-burn -n '${DEMO_NAMESPACE:-gpu-alert-scenario-2}' --ignore-not-found"
 }
 
+# scenario 3 needs a g6.2xlarge (NVIDIA L4) node specifically — the wattage
+# figures in SCENARIOS(KOR).md / SCENARIOS(ENG).md were measured on that flavor. Provisions it
+# on-demand (idempotent, same as any other gpu-machineset call) before
+# deploying the demo pod, so a fresh cluster only needs g5.2xlarge from `all`
+# and picks up g6.2xlarge automatically the first time this scenario runs.
+cmd_scenario3_powercap_start() {
+  GPU_INSTANCE_TYPE="${POWERCAP_INSTANCE_TYPE:-g6.2xlarge}" \
+  GPU_MACHINESET_AZ="${POWERCAP_MACHINESET_AZ:-us-east-1a}" \
+  GPU_REPLICAS="${POWERCAP_GPU_REPLICAS:-1}" \
+  GPU_MIN_REPLICAS="${POWERCAP_GPU_MIN_REPLICAS:-1}" \
+  GPU_MAX_REPLICAS="${POWERCAP_GPU_MAX_REPLICAS:-2}" \
+    cmd_gpu_machineset
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-powercap-scenario-3}' INSTANCE_TYPE='${POWERCAP_INSTANCE_TYPE:-g6.2xlarge}' \
+    BURST_COUNT='${BURST_COUNT:-3}' IDLE_SEC='${IDLE_SEC:-0.5}' \
+    bash -s" < ./remote/scenario3-powercap-start.sh
+}
+
+cmd_scenario3_powercap_apply() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-powercap-scenario-3}' bash -s -- '${1:-}'" \
+    < ./remote/scenario3-powercap-apply.sh
+}
+
+cmd_scenario3_powercap_stop() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-powercap-scenario-3}' bash -s" \
+    < ./remote/scenario3-powercap-stop.sh
+}
+
 cmd_destroy_cluster() {
   ssh_bastion 'export PATH=$PATH:/usr/local/bin; cd ~/ocp-install && openshift-install destroy cluster --dir=. --log-level=info'
 }
@@ -357,6 +387,9 @@ case "$cmd" in
   scenario1-autoscale-demo-stop)                    cmd_scenario1_autoscale_demo_stop ;;
   scenario2-alert-demo)                               cmd_scenario2_alert_demo ;;
   scenario2-alert-demo-stop)                            cmd_scenario2_alert_demo_stop ;;
+  scenario3-powercap-start)                               cmd_scenario3_powercap_start ;;
+  scenario3-powercap-apply)                                 cmd_scenario3_powercap_apply "$@" ;;
+  scenario3-powercap-stop)                                    cmd_scenario3_powercap_stop ;;
   destroy-cluster)                     cmd_destroy_cluster ;;
   destroy-bastion)                      cmd_destroy_bastion "$@" ;;
   all)                                    cmd_all ;;
