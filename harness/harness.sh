@@ -325,6 +325,7 @@ cmd_all() {
   cmd_install_config
   cmd_create_cluster
   cmd_wait_cluster
+  cmd_create_admin_user
   cmd_gpu_machineset
   cmd_gpu_operator
   cmd_rhoai
