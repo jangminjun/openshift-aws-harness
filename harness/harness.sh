@@ -308,7 +308,7 @@ cmd_scenario2_alert_demo_stop() {
 }
 
 # scenario 3 needs a g6.2xlarge (NVIDIA L4) node specifically — the wattage
-# figures in SCENARIOS(KOR).md / SCENARIOS(ENG).md were measured on that flavor. Provisions it
+# figures in GPUaaS-SCENARIOS(KOR).md / GPUaaS-SCENARIOS(ENG).md were measured on that flavor. Provisions it
 # on-demand (idempotent, same as any other gpu-machineset call) before
 # deploying the demo pod, so a fresh cluster only needs g5.2xlarge from `all`
 # and picks up g6.2xlarge automatically the first time this scenario runs.
