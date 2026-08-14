@@ -5,8 +5,12 @@ monitoring stack) is already up. This document lays out the customer-demo
 scenarios in **presentation order** — that numbering is different from the
 `openshift-monitoring` doc's own scenario numbers (1: overheat/fault, 2: GPU
 misuse, 3: inefficient code, 4: chargeback). This demo's "Scenario 2 (alert)"
-maps to the doc's "Scenario 1", and "Scenario 3 (Power Capping)" maps to the
-doc's separate "Green AI" section.
+and "Scenario 4 (fault isolation)" both map to the doc's "Scenario 1" (one is
+detection+alerting, the other is the response action), "Scenario 3 (Power
+Capping)" maps to the doc's separate "Green AI" section, "Scenarios 5/6
+(bad-code detection + PriorityClass/preemption)" both map to the doc's
+"Scenario 3", and "Scenario 7 (Chargeback & Quota)" maps to the doc's
+"Scenario 4".
 
 Either of these works:
 - Locally: `./harness.sh <command>` (needs a harness checkout + AWS profile)
@@ -263,18 +267,255 @@ lost, with the breakeven line, across all 3 L4/A10G series).
 
 ---
 
-## Idea — GPU Fault Scenario (not started)
+## Scenario 4 — GPU Node Fault Isolation and Automatic Rescheduling
 
-User-proposed: a scenario showing the response to an actual GPU hardware
-fault (XID errors, etc). This connects to the doc's [Scenario 1] "infra-team
-control actions" (cordon & drain, force-killing an overloading pod) — and
-also ties into the earlier-discussed "kill the pod when the alert fires"
-idea. Design to be continued in a future session. Candidate directions:
-- Find a way to artificially trigger an XID error (reproducing a real
-  hardware fault in software is tricky — need to check whether nvidia-smi can
-  force one)
-- Or force a node to `NotReady` to demonstrate just the "isolate the faulty
-  node" flow
+> **Status: fully wired into the harness + measurement-validated (2026-08-14).**
+
+**What it shows**: when a GPU node develops a fault, the infra team just has
+to isolate it (cordon & drain) — the workload reschedules onto a healthy GPU
+node automatically, no human moving it by hand. Reproduces the doc's
+[Scenario 1] "infra-team control action" (cordon & drain, force-evict the
+offending pod, reschedule to a healthy node) exactly.
+
+**Why we don't reproduce a real hardware fault**: there's no safe way to
+force an XID error via `nvidia-smi`, and actually damaging a cloud GPU is
+obviously out of the question. Instead, we assume "DCGM caught repeated XID
+errors on this node" and execute the infra team's **response action** (cordon
+& drain) directly — a natural continuation of the XID Errors panel/alert
+structure already shown in Scenario 2.
+
+**Setup**:
+- `fault-workload` is deployed as a **Deployment (not a bare Pod)** — this is
+  what lets the controller re-create the pod automatically once its node is
+  drained (a bare Pod just disappears when deleted; it doesn't come back on
+  its own)
+- No GPU flavor pin (no `nodeSelector`) — the scheduler places it on whichever
+  GPU node (g5 or g6) has room
+- Reuses the same PyTorch 8192×8192 matmul load container as Scenarios 1-3
+
+**Run**:
+```bash
+# locally
+./harness.sh scenario4-fault-start      # deploy fault-workload, note which node it landed on
+./harness.sh scenario4-fault-trigger    # cordon+drain that node -> confirm auto-reschedule
+./harness.sh scenario4-fault-stop       # cleanup (delete the deployment + uncordon all GPU nodes)
+
+# or directly on the bastion
+~/scenario4-fault-start.sh
+~/scenario4-fault-trigger.sh
+~/scenario4-fault-stop.sh
+```
+
+**Watch**:
+```bash
+oc get nodes -l nvidia.com/gpu.present=true -w   # watch the cordoned node go SchedulingDisabled
+oc get pods -n gpu-fault-scenario-4 -o wide -w   # watch the pod reschedule to the other node
+```
+- Grafana Tier1 "GPU Utilization by Node" panel — the isolated node drops to
+  0%, the node it moved to climbs to 100%, live
+
+**Measured result** (2026-08-14): with `fault-workload` running on
+`ip-10-0-17-5.ec2.internal`, triggering the fault → cordon → drain (evicts
+all non-daemonset pods, including `fault-workload`) → the Deployment
+controller immediately creates a new pod → it's auto-scheduled onto
+`ip-10-0-1-245.ec2.internal` (the other GPU node) → confirmed `Running`
+within about a minute. Cross-checked GPU utilization via Thanos Querier —
+the original node accurately reads 0%, the new node reads 100%.
+
+**Timing**: the whole cycle is **under a minute** — much faster than
+Scenarios 1/3 (~10 min each), since there's no new instance to provision.
+It does require both g5 and g6 GPU nodes to already be up (there has to be a
+"healthy node" to reschedule onto) — either the default state (1 each) or the
+temporarily-scaled-to-2 state right after Scenario 1 both work fine.
+
+**Cleanup**: `scenario4-fault-stop.sh` deletes the deployment and uncordons
+all GPU nodes in one call, so even if you stop mid-trigger, this one script
+returns the cluster to a clean state.
+
+---
+
+## Scenario 5 — Bad Code Detection (Bad Code Penalty)
+
+> **Status: fully wired into the harness + measurement-validated (2026-08-14).**
+
+**What it shows**: how much a single `DataLoader` setting — `num_workers` —
+can idle an expensive GPU, using the exact same training code, measured and
+graphed. Reproduces the doc's [Doc Scenario 3] "the GPU sits idle because of
+a Data Loader bottleneck" using the actual PyTorch mechanism (not a `sleep`
+standing in for it — a real difference in DataLoader worker count).
+
+**Why compare via `num_workers`**: with `num_workers=0`, the main process
+fetches samples **one at a time, serially** — the GPU sits completely idle
+until an entire batch is ready. With `num_workers>0`, separate worker
+processes **prefetch the next batch in the background while the GPU computes
+the current one**, cutting idle time sharply. This is the single most common
+real-world cause of — and fix for — "why is my GPU utilization so low."
+
+**Setup**:
+- Both pods run **identical code** — `Dataset.__getitem__` sleeps 0.2s per
+  sample (standing in for real image decode/augmentation cost), and each
+  "training step" runs a 4096×4096 matmul 10 times per batch (32 samples)
+- `bad-code-workload`: `num_workers=0`
+- `efficient-workload`: `num_workers=4`
+- **Gotcha**: with `num_workers>0`, PyTorch passes tensors between worker and
+  main processes via `/dev/shm` (shared memory) — the container default of
+  ~64MB is too small and crashes with `Bus error` /
+  `DataLoader worker exited unexpectedly`. Fixed by mounting an
+  `emptyDir(medium: Memory, sizeLimit: 1Gi)` at `/dev/shm` (found and fixed
+  via measurement on 2026-08-14)
+
+**Run**:
+```bash
+# locally
+./harness.sh scenario5-badcode-start
+./harness.sh scenario5-badcode-stop
+
+# or directly on the bastion
+oc logs -f bad-code-workload -n gpu-badcode-scenario-5
+oc logs -f efficient-workload -n gpu-badcode-scenario-5
+```
+
+**Watch**:
+- `oc logs` — over the same wall-clock time, `efficient-workload`'s step
+  counter climbs far faster than `bad-code-workload`'s (throughput gap)
+- Grafana Tier1 "GPU Compute vs Memory Utilization (Cluster Avg)" / Tier2
+  "Stall Pattern: High Memory, Low Compute" panel
+
+**Measured result** (2026-08-14, observed over 4 minutes):
+
+| Workload | Throughput (steps, same time) | Avg GPU_UTIL | Avg MEM_COPY_UTIL |
+|---|---|---|---|
+| `bad-code-workload` (num_workers=0) | 40 | **0%** | **0%** |
+| `efficient-workload` (num_workers=4) | 160 (4x) | **12%** | **5.25%** |
+
+The 4x throughput gap translated directly into the utilization gap —
+`bad-code-workload` sat at effectively 0% GPU_UTIL/MEM_COPY_UTIL for the
+entire observation window, quantitatively confirming the doc's "an expensive
+GPU sitting idle" premise. (The doc's original wording assumes a "memory
+90%+, compute periodically 0%" pattern; measured here, memory activity drops
+to near-zero right alongside compute — but the core lesson, "bad code idles
+the GPU," holds all the same.)
+
+**Not done yet — PriorityClass downgrade + preemption**: showing the doc's
+"infra team response" (code-improvement request + PriorityClass downgrade to
+Low, immediate preemption target under resource pressure) is Scenario 6.
+
+---
+
+## Scenario 6 — PriorityClass Downgrade and Preemption in Practice
+
+> **Status: fully wired into the harness + measurement-validated (2026-08-14).**
+
+**What it shows**: say the infra team downgraded a team's PriorityClass to
+Low after Scenario 5 flagged it — does that actually do anything? The moment
+capacity gets contested, Kubernetes **automatically** evicts (preempts) that
+team's pod and hands the GPU to a normal-priority workload. Reproduces the
+doc's "PriorityClass downgraded to Low → immediate preemption target under
+resource pressure" directly.
+
+**Core design — removing the race with the autoscaler**: `bad-code-workload`
+and `legitimate-workload` are both pinned to the same GPU flavor
+(g5.2xlarge, 1 node / 1 GPU) so that capacity is genuinely contested — but
+left alone, `MachineAutoscaler` could just add a second node and resolve it
+without any preemption at all (a race condition). To remove that,
+`scenario6-preempt-start.sh` temporarily **caps g5's MachineAutoscaler `max`
+at its current replica count (1)**, ruling out scale-out entirely so
+preemption is the only path forward. `scenario6-preempt-stop.sh` restores it
+to 2.
+
+**Setup**:
+- `PriorityClass/low-priority-team` (value: -1000000) — the "assigned to the
+  team flagged in Scenario 5" concept
+- `bad-code-workload`: `priorityClassName: low-priority-team`, pinned to
+  g5.2xlarge, requests 1 GPU — occupies the only GPU
+- `legitimate-workload`: default priority (no PriorityClass set, default
+  value 0 > -1000000), also pinned to g5.2xlarge, requests 1 GPU
+
+**Run**:
+```bash
+# locally
+./harness.sh scenario6-preempt-start      # bad-code-workload takes the GPU at low priority
+./harness.sh scenario6-preempt-trigger    # deploy legitimate-workload -> confirm preemption
+./harness.sh scenario6-preempt-stop       # cleanup + restore MachineAutoscaler max (2)
+```
+
+**Watch**:
+```bash
+oc get pods -n gpu-preempt-scenario-6 -w
+oc get events -n gpu-preempt-scenario-6 --field-selector reason=Preempted
+```
+
+**Measured result** (2026-08-14): with `bad-code-workload` `Running` on g5's
+only GPU at `low-priority-team` priority, deploying `legitimate-workload`
+(default priority) produced this event **about 34 seconds later**:
+```
+Normal   Preempted   pod/bad-code-workload   Preempted by pod 9a6d9af0-... on node ip-10-0-1-245.ec2.internal
+```
+`bad-code-workload` was evicted (`Gone`), and `legitimate-workload` took over
+the GPU as `Running`. The explicit "Preempted by pod ..." event is the
+evidence this was a real preemption, not a coincidental restart.
+
+**Cleanup**: `scenario6-preempt-stop.sh` handles both pod deletion and
+restoring the MachineAutoscaler max (2) in one call — even stopping mid-
+trigger, this one script returns the cluster to its normal state (min=1/
+max=2 on each flavor).
+
+---
+
+## Scenario 7 — Responding to a Cost Overrun (Chargeback & Quota)
+
+> **Status: fully wired into the harness + measurement-validated (2026-08-14).**
+
+**What it shows**: once the infra team decides a team is out of budget, a
+single `ResourceQuota` is enough to stop them from growing their GPU
+footprint any further — and it's rejected **immediately at admission time**,
+with no scheduling wait at all. Unlike Scenarios 4 and 6 (which resolve
+through scheduling/preemption), this is the fastest scenario of all — there's
+no wait whatsoever.
+
+**Cost visibility**: added an **"Estimated GPU Cost ($/hr)"** stat to Tier1's
+"Fleet Overview" row — computed as `sum(allocated GPUs) x $1.10` (an assumed
+blended rate between g5.2xlarge and g6.2xlarge on-demand pricing). This is
+explicitly an **estimate**, and its panel description says so — it isn't
+wired to a real billing system, so don't overstate it in the demo as an exact
+match to the actual AWS bill.
+
+**Setup**:
+- `team-workload-1`: requests 1 GPU, deployed (stands in for the team's
+  "already in use" footprint)
+- Infra team applies a `ResourceQuota` (`requests.nvidia.com/gpu: "1"`) —
+  capped at exactly the current usage (the endpoint of the doc's "immediately
+  cap it once the budget hits 70%" response)
+- `team-workload-2`: an attempt to request one more GPU — with the quota
+  already full, the API server **rejects it immediately**
+
+**Run**:
+```bash
+# locally
+./harness.sh scenario7-chargeback-start      # deploy team-workload-1 + apply the quota
+./harness.sh scenario7-chargeback-trigger    # attempt team-workload-2 -> confirm the instant rejection
+./harness.sh scenario7-chargeback-stop       # cleanup
+```
+
+**Measured result** (2026-08-14): with the `ResourceQuota` applied at
+`requests.nvidia.com/gpu: "1"` (usage also at 1), deploying `team-workload-2`
+produced:
+```
+Error from server (Forbidden): error when creating "STDIN": pods "team-workload-2" is
+forbidden: exceeded quota: gpu-quota, requested: requests.nvidia.com/gpu=1,
+used: requests.nvidia.com/gpu=1, limited: requests.nvidia.com/gpu=1
+```
+The pod was never even created (doesn't show up in `oc get pods`) — blocked
+at the API server's admission stage before the scheduler ever got involved.
+Faster than Scenario 4 (cordon+drain, ~1 min) and Scenario 6 (preemption,
+~34s), and the most deterministic of all — no wait, no race condition to
+worry about.
+
+**Not done yet — Node affinity (off-hours/Spot only)**: the doc's second
+response action ("force a Node affinity change so jobs only run during
+off-hours or on spare Spot instances") isn't implemented — the cluster's GPU
+MachineSets are On-Demand instances, there's no real Spot node to target, and
+standing one up is a separate MachineSet exercise out of scope here.
 
 ---
 
@@ -283,34 +524,6 @@ idea. Design to be continued in a future session. Candidate directions:
 The following are not yet automated in the harness. Detection conditions and
 the infra-team's response plan are defined in the doc, but there's no actual
 implementation (PrometheusRule, automated control action, etc).
-
-### [Doc Scenario 3] Flagging Inefficient Code and Restricting Scheduling (Bad Code Penalty)
-
-- **Situation**: a project team's inexperienced code creates a Data Loader
-  bottleneck — the GPU periodically sits idle, or holds onto HBM memory
-  without actually computing
-- **Detection condition**: GPU memory utilization above 90% while compute
-  utilization (`DCGM_FI_DEV_GPU_UTIL`) periodically drops to 0%
-- **Infra team's response**: formally issue a code-improvement request citing
-  "infrastructure resource efficiency harm," and downgrade that team's
-  PriorityClass to Low until the code is fixed (an immediate preemption
-  target under resource pressure)
-- **Currently visibility-only**: Tier1 dashboard's "GPU Compute vs Memory
-  Utilization (Cluster Avg)" panel, Tier2 dashboard's "Stall Pattern: High
-  Memory, Low Compute" panel
-
-### [Doc Scenario 4] Per-Project Cost Overrun (Chargeback) and Quota Enforcement
-
-- **Situation**: a specific team over-consumes its allocated GPU-hour budget,
-  risking a company-wide infrastructure budget overrun
-- **Detection condition**: (allocated GPU count) × (uptime) × (instance unit
-  price), accumulated, exceeds 70% of the target budget as of the
-  mid-period checkpoint
-- **Infra team's response**: adjust ResourceQuota to immediately cap that
-  team's concurrently-running GPU count, and force a Node affinity policy
-  change so its jobs only run during off-hours or on spare Spot instances
-- **Currently visibility-only**: Tier1 dashboard's "GPUs Allocated" stat,
-  Tier2 dashboard's "My Project GPU Quota (used / hard)" bargauge
 
 ### Green AI — RHCOS-based GPU Power Savings
 
@@ -381,9 +594,13 @@ to declaratively govern node/GPU power. Made up of 3 approaches:
 
 ## Notes
 
-- The two scenarios use different namespaces (`gpu-autoscale-scenario-1`,
-  `gpu-alert-scenario-2`), so running them simultaneously doesn't interfere
-  with each other.
+- The scenarios use different namespaces (`gpu-autoscale-scenario-1`,
+  `gpu-alert-scenario-2`, `gpu-powercap-scenario-3`, `gpu-fault-scenario-4`,
+  `gpu-badcode-scenario-5`, `gpu-preempt-scenario-6`,
+  `gpu-chargeback-scenario-7`), so running them simultaneously doesn't
+  interfere with each other. One exception: Scenario 6 temporarily caps
+  g5.2xlarge's MachineAutoscaler max, so don't run it at the same time as
+  Scenario 1 (which uses the same g5.2xlarge autoscaling demo).
 - The alerting pipeline is **not** OpenShift's default User Workload
   Monitoring — it's split off into an **independent Prometheus +
   Alertmanager** (the `gpu-monitoring` namespace). See the "GPU monitoring /
