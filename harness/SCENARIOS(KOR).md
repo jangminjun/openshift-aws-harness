@@ -4,8 +4,10 @@
 구축되어 있다는 전제 하에, 고객 데모용으로 준비된 시나리오들을 순서대로 정리한
 문서입니다. 번호는 **발표 순서** 기준이며, `openshift-monitoring` 문서 자체의
 시나리오 번호(1: 과열/장애, 2: GPU 오남용, 3: 비효율 코드, 4: Chargeback)와는
-다릅니다 — 이 데모의 "시나리오 2(알람)"가 문서상으로는 "시나리오 1"에 해당하고,
-"시나리오 3(Power Capping)"은 문서의 별도 섹션인 "Green AI"에 해당합니다.
+다릅니다 — 이 데모의 "시나리오 2(알람)"와 "시나리오 4(장애 격리)"가 둘 다
+문서상으로는 "시나리오 1"의 감지/조치 부분에 해당하고(하나는 감지+알림,
+하나는 조치), "시나리오 3(Power Capping)"은 문서의 별도 섹션인 "Green AI"에
+해당합니다.
 
 실행은 두 가지 방법 모두 가능합니다:
 - 로컬에서 `./harness.sh <command>` (harness 체크아웃 + AWS 프로필 필요)
@@ -241,15 +243,67 @@ L4/A10G 3개 시리즈).
 
 ---
 
-## 아이디어 — GPU 장애 시나리오 (미착수)
+## 시나리오 4 — GPU 노드 장애 격리 및 자동 재배치
 
-사용자 제안: 실제 GPU 하드웨어 장애(XID 에러 등)가 발생했을 때의 대응을 보여주는
-시나리오. 문서 [시나리오 1]의 "인프라팀 통제 액션"(cordon & drain, 과부하 pod
-강제 종료)과 맞닿아 있음 — 앞서 논의했던 "알람 발동 시 pod kill" 아이디어와도
-연결 지점이 있다. 다음 세션에서 설계 이어갈 것. 후보 방향:
-- XID 에러를 인위적으로 유발하는 방법 확보 (실제 하드웨어 결함을 소프트웨어로
-  재현하기 까다로움 — nvidia-smi로 강제 유발 가능한지 확인 필요)
-- 또는 노드를 강제로 `NotReady`로 만들어서 "장애 노드 격리" 흐름만 보여주는 방식
+> **상태: harness에 완전히 반영 + 실측 검증 완료 (2026-08-14).**
+
+**보여주는 것**: GPU 노드에 장애가 생기면, 인프라팀이 그 노드를 격리(cordon &
+drain)하는 것만으로 — 사람이 워크로드를 직접 옮기지 않아도 — 자동으로 다른
+정상 GPU 노드로 재배치된다. 문서 [시나리오 1]의 "인프라팀 통제 액션"(Cordon &
+Drain 처리, 과부하 Pod 강제 종료 후 정상 노드로 재배치)을 그대로 재현한다.
+
+**왜 실제 하드웨어 장애를 재현하지 않는가**: `nvidia-smi`로 XID 에러를
+안전하게 강제 유발하는 방법이 없고, 클라우드 GPU에 실제 손상을 유발하는 건
+당연히 불가능하다. 대신 "DCGM이 이 노드에서 XID 에러를 반복 감지했다"는
+상황을 가정하고, 인프라팀의 **대응 조치**(cordon & drain)를 그대로 실행하는
+방식으로 시연한다 — 시나리오2에서 이미 보여준 XID Errors 패널/알람 구조와
+자연스럽게 이어지는 스토리.
+
+**구성**:
+- `fault-workload`는 **bare Pod가 아니라 Deployment(replica=1)**로 배포 —
+  이래야 노드가 drain될 때 컨트롤러가 pod를 자동으로 재생성해서 다른 노드로
+  옮겨간다 (bare Pod는 삭제되면 그냥 사라지고 스스로 안 살아남)
+- 특정 GPU 플레이버에 고정하지 않음 (`nodeSelector` 없음) — 스케줄러가 g5든
+  g6든 여유 있는 아무 GPU 노드에나 배치
+- 시나리오1·2·3과 동일한 PyTorch 8192×8192 행렬곱 부하 컨테이너 재사용
+
+**실행**:
+```bash
+# 로컬에서
+./harness.sh scenario4-fault-start      # fault-workload 배포, 어느 노드에 떴는지 확인
+./harness.sh scenario4-fault-trigger    # 그 노드를 cordon+drain -> 자동 재배치 확인
+./harness.sh scenario4-fault-stop       # 정리 (deployment 삭제 + 모든 GPU 노드 uncordon)
+
+# 또는 bastion에서 직접
+~/scenario4-fault-start.sh
+~/scenario4-fault-trigger.sh
+~/scenario4-fault-stop.sh
+```
+
+**지켜볼 것**:
+```bash
+oc get nodes -l nvidia.com/gpu.present=true -w   # cordon되는 노드의 SchedulingDisabled 확인
+oc get pods -n gpu-fault-scenario-4 -o wide -w   # pod가 다른 노드로 재배치되는 것 확인
+```
+- Grafana Tier1 "GPU Utilization by Node" 패널 — 격리된 노드는 0%로 떨어지고,
+  재배치된 노드는 100%로 올라가는 게 실시간으로 보임
+
+**실측 결과** (2026-08-14): `fault-workload`가 `ip-10-0-17-5.ec2.internal`에서
+실행 중이던 상태에서 트리거 실행 → cordon → drain(daemonset 제외 pod들 축출,
+`fault-workload` 포함) → Deployment 컨트롤러가 즉시 새 pod 생성 →
+`ip-10-0-1-245.ec2.internal`(다른 GPU 노드)에 자동 스케줄 → 약 1분 이내
+`Running` 전환 확인. Thanos Querier로 GPU 사용률 교차 확인 — 원래 노드
+0%, 새 노드 100%로 정확히 반영됨.
+
+**타이밍**: 전체 과정 **1분 이내** — 시나리오1·3(각 ~10분 대기)과 달리 새
+인스턴스 프로비저닝이 필요 없어서 훨씬 빠르다. 다만 g5·g6 GPU 노드가 각각
+1대씩 이미 떠 있어야 한다 (재배치 받을 "정상 노드"가 있어야 하므로) — 시나리오
+1을 실행한 직후처럼 GPU MachineSet이 일시적으로 2대로 늘어나 있는 상태이거나,
+평소 기본 상태(각 1대)면 충분하다.
+
+**정리**: `scenario4-fault-stop.sh`가 deployment 삭제와 GPU 노드 전체
+uncordon을 같이 처리하므로, 트리거 도중에 중단하더라도 이 스크립트 한 번으로
+클러스터가 깨끗한 상태로 돌아온다.
 
 ---
 
@@ -346,8 +400,9 @@ RHCOS(Red Hat Enterprise Linux CoreOS)의 불변성(Immutability)을 활용해
 
 ## 참고
 
-- 두 시나리오는 서로 다른 네임스페이스(`gpu-autoscale-scenario-1`,
-  `gpu-alert-scenario-2`)를 쓰므로 동시에 진행해도 서로 간섭하지 않습니다.
+- 시나리오들은 서로 다른 네임스페이스(`gpu-autoscale-scenario-1`,
+  `gpu-alert-scenario-2`, `gpu-powercap-scenario-3`, `gpu-fault-scenario-4`)를
+  쓰므로 동시에 진행해도 서로 간섭하지 않습니다.
 - 알람 파이프라인은 OpenShift 기본 User Workload Monitoring이 아니라
   **독립적인 Prometheus + Alertmanager**로 분리되어 있습니다 (`gpu-monitoring`
   네임스페이스). 이유와 배경은 `harness/README.md`의

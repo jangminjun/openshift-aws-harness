@@ -31,6 +31,9 @@
 #   scenario3-powercap-start                                provisions g6.2xlarge, deploys power-load pod at full power draw
 #   scenario3-powercap-apply [watts]                          nvidia-smi -pl on the power-load node (no arg = reset to default)
 #   scenario3-powercap-stop                                     delete the power-load pod, reset power limit to default
+#   scenario4-fault-start                                         deploy fault-workload (Deployment) on a GPU node
+#   scenario4-fault-trigger                                         cordon+drain its node, watch it reschedule elsewhere
+#   scenario4-fault-stop                                              delete the deployment, uncordon GPU nodes
 #   all                                    run the full cluster+GPU+RHOAI sequence, end to end
 #   destroy-cluster                          openshift-install destroy cluster
 #   destroy-bastion --yes                      tear down bastion + its network (destructive)
@@ -323,6 +326,21 @@ cmd_scenario3_powercap_stop() {
     < ./remote/scenario3-powercap-stop.sh
 }
 
+cmd_scenario4_fault_start() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-fault-scenario-4}' bash -s" \
+    < ./remote/scenario4-fault-start.sh
+}
+
+cmd_scenario4_fault_trigger() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-fault-scenario-4}' bash -s" \
+    < ./remote/scenario4-fault-trigger.sh
+}
+
+cmd_scenario4_fault_stop() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-fault-scenario-4}' bash -s" \
+    < ./remote/scenario4-fault-stop.sh
+}
+
 cmd_destroy_cluster() {
   ssh_bastion 'export PATH=$PATH:/usr/local/bin; cd ~/ocp-install && openshift-install destroy cluster --dir=. --log-level=info'
 }
@@ -390,6 +408,9 @@ case "$cmd" in
   scenario3-powercap-start)                               cmd_scenario3_powercap_start ;;
   scenario3-powercap-apply)                                 cmd_scenario3_powercap_apply "$@" ;;
   scenario3-powercap-stop)                                    cmd_scenario3_powercap_stop ;;
+  scenario4-fault-start)                                        cmd_scenario4_fault_start ;;
+  scenario4-fault-trigger)                                        cmd_scenario4_fault_trigger ;;
+  scenario4-fault-stop)                                             cmd_scenario4_fault_stop ;;
   destroy-cluster)                     cmd_destroy_cluster ;;
   destroy-bastion)                      cmd_destroy_bastion "$@" ;;
   all)                                    cmd_all ;;
