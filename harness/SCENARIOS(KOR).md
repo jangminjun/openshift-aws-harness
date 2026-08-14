@@ -6,8 +6,9 @@
 시나리오 번호(1: 과열/장애, 2: GPU 오남용, 3: 비효율 코드, 4: Chargeback)와는
 다릅니다 — 이 데모의 "시나리오 2(알람)"와 "시나리오 4(장애 격리)"가 둘 다
 문서상으로는 "시나리오 1"의 감지/조치 부분에 해당하고(하나는 감지+알림,
-하나는 조치), "시나리오 3(Power Capping)"은 문서의 별도 섹션인 "Green AI"에
-해당합니다.
+하나는 조치), "시나리오 3(Power Capping)"은 문서의 별도 섹션인 "Green AI",
+"시나리오 5·6(비효율 코드 탐지 + PriorityClass/Preemption)"은 둘 다 문서의
+"시나리오 3"의 감지/조치 부분에 해당합니다.
 
 실행은 두 가지 방법 모두 가능합니다:
 - 로컬에서 `./harness.sh <command>` (harness 체크아웃 + AWS 프로필 필요)
@@ -307,24 +308,133 @@ uncordon을 같이 처리하므로, 트리거 도중에 중단하더라도 이 �
 
 ---
 
+## 시나리오 5 — 비효율 코드 탐지 (Bad Code Penalty)
+
+> **상태: harness 반영 + 실측 검증 완료 (2026-08-14).**
+> PriorityClass 하향 + Preemption 실효성 증명은 [시나리오 6](#시나리오-6--priorityclass-하향-및-preemption-실효성-증명)에서 이어짐.
+
+**보여주는 것**: 똑같은 학습 코드인데 `DataLoader`의 `num_workers` 설정
+하나 차이로 비싼 GPU를 얼마나 놀리는지를 실측 그래프로 비교한다. 문서
+[문서 시나리오 3]의 "Data Loader 병목으로 GPU가 놀고 있다"는 상황을 실제
+PyTorch 메커니즘으로 재현한다 (인위적인 `sleep`으로 흉내내는 게 아니라, 진짜
+`DataLoader` 워커 수 설정 차이).
+
+**왜 `num_workers`로 비교하는가**: `num_workers=0`이면 메인 프로세스
+혼자 샘플을 **한 개씩 순차적으로** 준비한다 — 배치 하나 다 준비될 때까지 GPU는
+완전히 손 놓고 기다린다. `num_workers>0`이면 별도 워커 프로세스들이 **GPU가
+지금 배치를 계산하는 동안 다음 배치를 미리(prefetch) 준비**해서, GPU가 노는
+시간이 크게 줄어든다. 이건 실제 "왜 내 GPU 사용률이 낮지" 문제의 가장 흔한
+원인이자, 가장 흔한 해법이다.
+
+**구성**:
+- 두 pod가 **동일한 코드**를 돌림 — `Dataset.__getitem__`마다 0.2초 sleep으로
+  실제 이미지 디코딩/증강 비용을 흉내내고, 매 배치(32개)마다 4096×4096
+  행렬곱을 10회 반복하는 "학습 스텝"을 수행
+- `bad-code-workload`: `num_workers=0`
+- `efficient-workload`: `num_workers=4`
+- **주의**: `num_workers>0`이면 PyTorch가 `/dev/shm`(공유 메모리)으로 텐서를
+  워커-메인 프로세스 간 주고받는데, 컨테이너 기본 `/dev/shm`은 보통 64MB로
+  너무 작아서 `Bus error` / `DataLoader worker exited unexpectedly`로
+  크래시한다 — pod에 `emptyDir(medium: Memory, sizeLimit: 1Gi)`를
+  `/dev/shm`에 마운트해서 해결함 (2026-08-14 실측으로 발견/수정)
+
+**실행**:
+```bash
+# 로컬에서
+./harness.sh scenario5-badcode-start
+./harness.sh scenario5-badcode-stop
+
+# 또는 bastion에서 직접
+oc logs -f bad-code-workload -n gpu-badcode-scenario-5
+oc logs -f efficient-workload -n gpu-badcode-scenario-5
+```
+
+**지켜볼 것**:
+- `oc logs` — 같은 시간 동안 `efficient-workload`가 `bad-code-workload`보다
+  스텝이 훨씬 빨리 올라감 (처리량 차이)
+- Grafana Tier1 "GPU Compute vs Memory Utilization (Cluster Avg)" / Tier2
+  "Stall Pattern: High Memory, Low Compute" 패널
+
+**실측 결과** (2026-08-14, 4분간 관찰):
+
+| 워크로드 | 처리량(스텝, 동일 시간) | 평균 GPU_UTIL | 평균 MEM_COPY_UTIL |
+|---|---|---|---|
+| `bad-code-workload` (num_workers=0) | 40 | **0%** | **0%** |
+| `efficient-workload` (num_workers=4) | 160 (4배) | **12%** | **5.25%** |
+
+처리량 4배 차이가 그대로 GPU 이용률 차이로 이어졌다 — `bad-code-workload`는
+관찰 window 내내 GPU_UTIL/MEM_COPY_UTIL이 사실상 0%에 머물러서, 문서가
+말하는 "비싼 GPU를 사놓고 놀리고 있다"는 상황을 정량적으로 보여준다. (문서
+원문은 "메모리 90%↑, 연산만 주기적으로 0%" 패턴을 가정하지만, 실측해보니 이
+워크로드에서는 메모리 활동도 연산과 함께 거의 0으로 같이 떨어진다 — 그래도
+핵심 메시지인 "코드가 나쁘면 GPU가 논다"는 동일하게 증명된다.)
+
+---
+
+## 시나리오 6 — PriorityClass 하향 및 Preemption 실효성 증명
+
+> **상태: harness 반영 + 실측 검증 완료 (2026-08-14).**
+
+**보여주는 것**: 시나리오 5에서 "비효율 코드"로 지적된 팀에게 인프라팀이
+PriorityClass를 Low로 낮췄다고 하자 — 그런데 이게 진짜 효과가 있나?
+자원이 부족해지는 순간, Kubernetes가 **자동으로** 그 팀의 pod를 강제
+축출(Preemption)하고 정상 우선순위 워크로드에게 자리를 내주는 것까지
+실제로 확인한다. 문서의 "PriorityClass Low 하향 → 자원 부족 시 즉시
+Preemption 대상"을 그대로 재현.
+
+**핵심 설계 — 오토스케일러와의 경쟁 상태 제거**: `bad-code-workload`와
+`legitimate-workload`를 같은 GPU 플레이버(g5.2xlarge, 노드 1대/GPU 1장)에
+몰아넣어서 "자리가 없어야" Preemption이 의미가 있는데, 이대로 두면
+`MachineAutoscaler`가 새 노드를 추가해서 Preemption 없이도 해결해버릴 수
+있다(경쟁 상태). 그래서 `scenario6-preempt-start.sh`가 g5
+MachineAutoscaler의 `max`를 **현재 replica 수(1)로 일시적으로 고정**해서
+오토스케일 자체를 원천 차단한다 — Preemption이 유일한 해결책이 되도록.
+`scenario6-preempt-stop.sh`가 다시 2로 복원한다.
+
+**구성**:
+- `PriorityClass/low-priority-team` (value: -1000000) — "시나리오 5에서
+  적발된 팀에게 부여" 컨셉
+- `bad-code-workload`: `priorityClassName: low-priority-team`, g5.2xlarge
+  고정, GPU 1장 요청 — 유일한 GPU를 선점
+- `legitimate-workload`: 기본 우선순위(PriorityClass 미지정, 기본값 0 >
+  -1000000), 동일하게 g5.2xlarge 고정, GPU 1장 요청
+
+**실행**:
+```bash
+# 로컬에서
+./harness.sh scenario6-preempt-start      # bad-code-workload가 low-priority로 GPU 선점
+./harness.sh scenario6-preempt-trigger    # legitimate-workload 배포 -> Preemption 확인
+./harness.sh scenario6-preempt-stop       # 정리 + MachineAutoscaler max 원복(2)
+```
+
+**지켜볼 것**:
+```bash
+oc get pods -n gpu-preempt-scenario-6 -w
+oc get events -n gpu-preempt-scenario-6 --field-selector reason=Preempted
+```
+
+**실측 결과** (2026-08-14): `bad-code-workload`가 `low-priority-team`으로
+g5의 유일한 GPU에서 `Running` 중인 상태에서 `legitimate-workload`(기본
+우선순위) 배포 → **약 34초 만에** 다음 이벤트 확인:
+```
+Normal   Preempted   pod/bad-code-workload   Preempted by pod 9a6d9af0-... on node ip-10-0-1-245.ec2.internal
+```
+`bad-code-workload`는 축출되어 사라졌고(`Gone`), `legitimate-workload`가
+그 GPU에서 `Running`으로 전환됨. Kubernetes 이벤트 로그에 "Preempted by
+pod ..."가 명시적으로 남아서, 우연한 재시작이 아니라 **진짜 Preemption이
+일어났다는 증거**가 된다.
+
+**정리**: `scenario6-preempt-stop.sh` 한 번으로 pod 삭제 +
+MachineAutoscaler max 원복(2)까지 다 처리됨. 트리거 도중 중단해도 이
+스크립트로 클러스터가 원래 상태(각 플레이버 min=1/max=2)로 돌아온다.
+
+---
+
 ## 미구현 시나리오 (참고용, `openshift-monitoring` 문서 원본 번호 기준)
 
 아래는 아직 harness에 자동화되어 있지 않은 시나리오들입니다. 감지 조건과
 인프라팀 조치안은 문서에 정의되어 있으나, 실제 구현(PrometheusRule, 자동 통제
 액션 등)은 없는 상태입니다.
-
-### [문서 시나리오 3] 비효율 코드 지적 및 스케줄링 제한 (Bad Code Penalty)
-
-- **상황**: 프로젝트팀 코드 미숙으로 Data Loader 병목 발생 — GPU가 주기적으로
-  놀거나, HBM 메모리만 잡아놓고 실제 연산은 안 함
-- **감지 조건**: GPU Memory 이용률 90%↑ 인데 연산 이용률(`DCGM_FI_DEV_GPU_UTIL`)이
-  주기적으로 0%로 떨어지는 패턴
-- **인프라팀 조치안**: "인프라 자원 효율성 저해" 사유로 코드 개선 요청서 공식
-  발행 + 코드 개선 전까지 해당 팀 PriorityClass를 Low로 하향 (자원 부족 시
-  즉시 Preemption 대상)
-- **현재 가시성만 있음**: Tier1 대시보드 "GPU Compute vs Memory Utilization
-  (Cluster Avg)" 패널, Tier2 대시보드 "Stall Pattern: High Memory, Low Compute"
-  패널
 
 ### [문서 시나리오 4] 프로젝트별 비용 초과(Chargeback) 및 Quota 통제
 
@@ -401,8 +511,11 @@ RHCOS(Red Hat Enterprise Linux CoreOS)의 불변성(Immutability)을 활용해
 ## 참고
 
 - 시나리오들은 서로 다른 네임스페이스(`gpu-autoscale-scenario-1`,
-  `gpu-alert-scenario-2`, `gpu-powercap-scenario-3`, `gpu-fault-scenario-4`)를
-  쓰므로 동시에 진행해도 서로 간섭하지 않습니다.
+  `gpu-alert-scenario-2`, `gpu-powercap-scenario-3`, `gpu-fault-scenario-4`,
+  `gpu-badcode-scenario-5`, `gpu-preempt-scenario-6`)를 쓰므로 동시에
+  진행해도 서로 간섭하지 않습니다. 단, 시나리오 6은 g5.2xlarge
+  MachineAutoscaler의 max를 일시적으로 1로 낮추므로, 시나리오 1(같은
+  g5.2xlarge를 쓰는 오토스케일링 데모)과는 동시에 진행하지 말 것.
 - 알람 파이프라인은 OpenShift 기본 User Workload Monitoring이 아니라
   **독립적인 Prometheus + Alertmanager**로 분리되어 있습니다 (`gpu-monitoring`
   네임스페이스). 이유와 배경은 `harness/README.md`의

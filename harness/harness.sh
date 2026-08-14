@@ -34,6 +34,11 @@
 #   scenario4-fault-start                                         deploy fault-workload (Deployment) on a GPU node
 #   scenario4-fault-trigger                                         cordon+drain its node, watch it reschedule elsewhere
 #   scenario4-fault-stop                                              delete the deployment, uncordon GPU nodes
+#   scenario5-badcode-start                                             bad-code-workload (num_workers=0) vs efficient-workload (num_workers=4)
+#   scenario5-badcode-stop                                                delete both comparison pods
+#   scenario6-preempt-start                                                 low-priority bad-code-workload occupies the only GPU
+#   scenario6-preempt-trigger                                                 normal-priority pod preempts it
+#   scenario6-preempt-stop                                                      delete both pods, restore MachineAutoscaler max
 #   all                                    run the full cluster+GPU+RHOAI sequence, end to end
 #   destroy-cluster                          openshift-install destroy cluster
 #   destroy-bastion --yes                      tear down bastion + its network (destructive)
@@ -341,6 +346,33 @@ cmd_scenario4_fault_stop() {
     < ./remote/scenario4-fault-stop.sh
 }
 
+cmd_scenario5_badcode_start() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-badcode-scenario-5}' \
+    PER_SAMPLE_SLEEP='${PER_SAMPLE_SLEEP:-0.2}' BATCH_SIZE='${BATCH_SIZE:-32}' \
+    GOOD_NUM_WORKERS='${GOOD_NUM_WORKERS:-4}' bash -s" \
+    < ./remote/scenario5-badcode-start.sh
+}
+
+cmd_scenario5_badcode_stop() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-badcode-scenario-5}' bash -s" \
+    < ./remote/scenario5-badcode-stop.sh
+}
+
+cmd_scenario6_preempt_start() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-preempt-scenario-6}' INSTANCE_TYPE='${INSTANCE_TYPE:-g5.2xlarge}' bash -s" \
+    < ./remote/scenario6-preempt-start.sh
+}
+
+cmd_scenario6_preempt_trigger() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-preempt-scenario-6}' INSTANCE_TYPE='${INSTANCE_TYPE:-g5.2xlarge}' bash -s" \
+    < ./remote/scenario6-preempt-trigger.sh
+}
+
+cmd_scenario6_preempt_stop() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-preempt-scenario-6}' INSTANCE_TYPE='${INSTANCE_TYPE:-g5.2xlarge}' RESTORE_MAX='${RESTORE_MAX:-2}' bash -s" \
+    < ./remote/scenario6-preempt-stop.sh
+}
+
 cmd_destroy_cluster() {
   ssh_bastion 'export PATH=$PATH:/usr/local/bin; cd ~/ocp-install && openshift-install destroy cluster --dir=. --log-level=info'
 }
@@ -411,6 +443,11 @@ case "$cmd" in
   scenario4-fault-start)                                        cmd_scenario4_fault_start ;;
   scenario4-fault-trigger)                                        cmd_scenario4_fault_trigger ;;
   scenario4-fault-stop)                                             cmd_scenario4_fault_stop ;;
+  scenario5-badcode-start)                                            cmd_scenario5_badcode_start ;;
+  scenario5-badcode-stop)                                               cmd_scenario5_badcode_stop ;;
+  scenario6-preempt-start)                                                cmd_scenario6_preempt_start ;;
+  scenario6-preempt-trigger)                                                cmd_scenario6_preempt_trigger ;;
+  scenario6-preempt-stop)                                                     cmd_scenario6_preempt_stop ;;
   destroy-cluster)                     cmd_destroy_cluster ;;
   destroy-bastion)                      cmd_destroy_bastion "$@" ;;
   all)                                    cmd_all ;;
