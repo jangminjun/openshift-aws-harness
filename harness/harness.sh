@@ -39,6 +39,9 @@
 #   scenario6-preempt-start                                                 low-priority bad-code-workload occupies the only GPU
 #   scenario6-preempt-trigger                                                 normal-priority pod preempts it
 #   scenario6-preempt-stop                                                      delete both pods, restore MachineAutoscaler max
+#   scenario7-chargeback-start                                                    team-workload-1 (1 GPU) + ResourceQuota capping the namespace at it
+#   scenario7-chargeback-trigger                                                    attempt a second GPU pod -> rejected at admission time
+#   scenario7-chargeback-stop                                                         delete pods + ResourceQuota
 #   all                                    run the full cluster+GPU+RHOAI sequence, end to end
 #   destroy-cluster                          openshift-install destroy cluster
 #   destroy-bastion --yes                      tear down bastion + its network (destructive)
@@ -373,6 +376,21 @@ cmd_scenario6_preempt_stop() {
     < ./remote/scenario6-preempt-stop.sh
 }
 
+cmd_scenario7_chargeback_start() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-chargeback-scenario-7}' GPU_QUOTA='${GPU_QUOTA:-1}' bash -s" \
+    < ./remote/scenario7-chargeback-start.sh
+}
+
+cmd_scenario7_chargeback_trigger() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-chargeback-scenario-7}' bash -s" \
+    < ./remote/scenario7-chargeback-trigger.sh
+}
+
+cmd_scenario7_chargeback_stop() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-chargeback-scenario-7}' bash -s" \
+    < ./remote/scenario7-chargeback-stop.sh
+}
+
 cmd_destroy_cluster() {
   ssh_bastion 'export PATH=$PATH:/usr/local/bin; cd ~/ocp-install && openshift-install destroy cluster --dir=. --log-level=info'
 }
@@ -448,6 +466,9 @@ case "$cmd" in
   scenario6-preempt-start)                                                cmd_scenario6_preempt_start ;;
   scenario6-preempt-trigger)                                                cmd_scenario6_preempt_trigger ;;
   scenario6-preempt-stop)                                                     cmd_scenario6_preempt_stop ;;
+  scenario7-chargeback-start)                                                   cmd_scenario7_chargeback_start ;;
+  scenario7-chargeback-trigger)                                                   cmd_scenario7_chargeback_trigger ;;
+  scenario7-chargeback-stop)                                                        cmd_scenario7_chargeback_stop ;;
   destroy-cluster)                     cmd_destroy_cluster ;;
   destroy-bastion)                      cmd_destroy_bastion "$@" ;;
   all)                                    cmd_all ;;

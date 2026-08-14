@@ -8,7 +8,8 @@
 문서상으로는 "시나리오 1"의 감지/조치 부분에 해당하고(하나는 감지+알림,
 하나는 조치), "시나리오 3(Power Capping)"은 문서의 별도 섹션인 "Green AI",
 "시나리오 5·6(비효율 코드 탐지 + PriorityClass/Preemption)"은 둘 다 문서의
-"시나리오 3"의 감지/조치 부분에 해당합니다.
+"시나리오 3"의 감지/조치 부분에, "시나리오 7(Chargeback & Quota)"은 문서의
+"시나리오 4"에 해당합니다.
 
 실행은 두 가지 방법 모두 가능합니다:
 - 로컬에서 `./harness.sh <command>` (harness 체크아웃 + AWS 프로필 필요)
@@ -430,23 +431,63 @@ MachineAutoscaler max 원복(2)까지 다 처리됨. 트리거 도중 중단해�
 
 ---
 
+## 시나리오 7 — 비용 초과 대응 (Chargeback & Quota)
+
+> **상태: harness 반영 + 실측 검증 완료 (2026-08-14).**
+
+**보여주는 것**: 팀이 예산을 다 썼다고 인프라팀이 판단하면, `ResourceQuota`
+하나로 그 팀이 더 이상 GPU를 못 늘리게 즉시 막을 수 있다 — 그리고 이건
+스케줄링을 기다릴 필요도 없이 **API 요청 즉시(admission 단계에서) 거부**된다.
+시나리오 4·6(스케줄링/Preemption 기반)과 달리 대기 시간이 전혀 없는 가장
+빠른 시나리오.
+
+**비용 가시성**: Tier1 "Fleet Overview" 행에 **"Estimated GPU Cost ($/hr)"**
+패널 추가 — `sum(할당된 GPU) × $1.10`(g5.2xlarge·g6.2xlarge 온디맨드 단가
+사이의 가정 블렌디드 요금)로 계산한 **추정치**다. 실제 청구 시스템과 연동된
+게 아니라 일러스트레이션 목적임을 패널 description에도 명시해뒀다 — 데모에서
+"이게 실제 AWS 청구액과 정확히 일치한다"고 과장하지 말 것.
+
+**구성**:
+- `team-workload-1`: GPU 1장 요청, 배포 (그 팀의 "이미 쓰고 있는" 사용량 흉내)
+- 인프라팀이 `ResourceQuota`(`requests.nvidia.com/gpu: "1"`)를 적용 — 현재
+  사용량과 정확히 같은 값으로 캡핑 (문서상 "예산의 70% 초과 시 즉시 제한"의
+  종착점)
+- `team-workload-2`: 추가로 GPU 1장을 더 요청하려는 시도 — 이미 quota가
+  꽉 차 있어서 API 서버가 **즉시 거부**
+
+**실행**:
+```bash
+# 로컬에서
+./harness.sh scenario7-chargeback-start      # team-workload-1 배포 + quota 적용
+./harness.sh scenario7-chargeback-trigger    # team-workload-2 시도 -> 즉시 거부 확인
+./harness.sh scenario7-chargeback-stop       # 정리
+```
+
+**실측 결과** (2026-08-14): `ResourceQuota`가 `requests.nvidia.com/gpu: "1"`
+로 적용된 상태(사용량도 1)에서 `team-workload-2` 배포 시도 →
+```
+Error from server (Forbidden): error when creating "STDIN": pods "team-workload-2" is
+forbidden: exceeded quota: gpu-quota, requested: requests.nvidia.com/gpu=1,
+used: requests.nvidia.com/gpu=1, limited: requests.nvidia.com/gpu=1
+```
+pod 자체가 생성조차 안 됨(`oc get pods`에 안 뜸) — 스케줄러가 개입하기도
+전에 API 서버 admission 단계에서 막힌 것. 시나리오 4(cordon+drain, ~1분),
+시나리오 6(preemption, ~34초)보다도 빠르고, 대기/경쟁 상태 걱정이 아예 없는
+가장 결정적인(deterministic) 시나리오다.
+
+**아직 안 한 것 — Node affinity(야간/Spot 전용)**: 문서의 두 번째 조치안
+("야간 시간대나 남는 Spot 인스턴스에서만 작업이 돌도록 Node affinity 강제
+변경")은 미구현 — 지금 클러스터의 GPU MachineSet이 On-Demand 인스턴스라
+실제 Spot 인스턴스 노드가 없고, 새로 만들려면 별도 MachineSet 작업이
+필요해서 범위 밖으로 뒀다.
+
+---
+
 ## 미구현 시나리오 (참고용, `openshift-monitoring` 문서 원본 번호 기준)
 
 아래는 아직 harness에 자동화되어 있지 않은 시나리오들입니다. 감지 조건과
 인프라팀 조치안은 문서에 정의되어 있으나, 실제 구현(PrometheusRule, 자동 통제
 액션 등)은 없는 상태입니다.
-
-### [문서 시나리오 4] 프로젝트별 비용 초과(Chargeback) 및 Quota 통제
-
-- **상황**: 특정 팀이 할당된 GPU-Hour 예산을 과다 소진해서 전사 인프라 예산
-  오버런 위험
-- **감지 조건**: (할당 GPU 수량) × (가동시간) × (인스턴스 단가) 누적이 중간
-  점검일 기준 목표 예산의 70% 초과
-- **인프라팀 조치안**: ResourceQuota를 조율해서 해당 팀의 동시 실행 가능
-  GPU 개수 즉시 제한 + 야간 시간대/남는 Spot 인스턴스에서만 작업이 돌도록
-  Node affinity 정책 강제 변경
-- **현재 가시성만 있음**: Tier1 대시보드 "GPUs Allocated" stat, Tier2 대시보드
-  "My Project GPU Quota (used / hard)" bargauge
 
 ### Green AI — RHCOS 기반 GPU 전력 절감
 
@@ -512,7 +553,8 @@ RHCOS(Red Hat Enterprise Linux CoreOS)의 불변성(Immutability)을 활용해
 
 - 시나리오들은 서로 다른 네임스페이스(`gpu-autoscale-scenario-1`,
   `gpu-alert-scenario-2`, `gpu-powercap-scenario-3`, `gpu-fault-scenario-4`,
-  `gpu-badcode-scenario-5`, `gpu-preempt-scenario-6`)를 쓰므로 동시에
+  `gpu-badcode-scenario-5`, `gpu-preempt-scenario-6`,
+  `gpu-chargeback-scenario-7`)를 쓰므로 동시에
   진행해도 서로 간섭하지 않습니다. 단, 시나리오 6은 g5.2xlarge
   MachineAutoscaler의 max를 일시적으로 1로 낮추므로, 시나리오 1(같은
   g5.2xlarge를 쓰는 오토스케일링 데모)과는 동시에 진행하지 말 것.

@@ -16,7 +16,7 @@
       "title": "GPU Nodes Online",
       "type": "stat",
       "datasource": "${DS_THANOS}",
-      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 1 },
       "targets": [
         {
           "expr": "count(kube_node_status_capacity{resource=\"nvidia_com_gpu\"} > 0)",
@@ -30,7 +30,7 @@
       "title": "Total GPUs (Capacity)",
       "type": "stat",
       "datasource": "${DS_THANOS}",
-      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 1 },
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 1 },
       "targets": [
         {
           "expr": "sum(kube_node_status_capacity{resource=\"nvidia_com_gpu\"})",
@@ -44,7 +44,7 @@
       "title": "GPUs Allocated",
       "type": "stat",
       "datasource": "${DS_THANOS}",
-      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 1 },
+      "gridPos": { "h": 5, "w": 4, "x": 8, "y": 1 },
       "description": "Sum of requests.nvidia.com/gpu across all pods. Gap vs. Total GPUs = idle capacity (scenario 2/4 candidates).",
       "targets": [
         {
@@ -55,11 +55,32 @@
       ]
     },
     {
+      "id": 19,
+      "title": "Estimated GPU Cost ($/hr)",
+      "type": "stat",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 5, "w": 8, "x": 12, "y": 1 },
+      "description": "Illustrative only: allocated GPUs x an assumed blended on-demand rate ($1.10/GPU-hr, roughly between g5.2xlarge and g6.2xlarge on-demand pricing). Not wired to real billing data -- scenario 7's chargeback/quota story.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2
+        }
+      },
+      "targets": [
+        {
+          "expr": "(sum(kube_pod_container_resource_requests{resource=\"nvidia_com_gpu\"}) OR on() vector(0)) * 1.10",
+          "legendFormat": "est. $/hr",
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
       "id": 4,
       "title": "Avg GPU Temperature",
       "type": "stat",
       "datasource": "${DS_THANOS}",
-      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 1 },
+      "gridPos": { "h": 5, "w": 4, "x": 20, "y": 1 },
       "fieldConfig": {
         "defaults": {
           "unit": "celsius",
