@@ -639,58 +639,46 @@ Sources: [How to set up KServe autoscaling for vLLM with KEDA](https://developer
 
 ---
 
-## Scenario 9 — Kueue + Dynamic Resource Allocation (DRA)
+## Scenario 9 — KServe Serverless (Knative) + vLLM, Real Scale-to-Zero
 
-> **Status: design confirmed, harness implementation and live validation in
-> progress (2026-08-20 — the original version was MachineAutoscaler-based
-> "dynamic allocation + reclaim," but that idea is already covered
-> separately by Scenario 1 (allocation) and the old Scenario 8 (reclaim), so
-> this was redesigned to show a genuinely more sophisticated GPUaaS
-> scheduling layer instead: Kueue + DRA).**
+> **Status: design confirmed, implementation planned for tomorrow
+> (2026-08-20 — written right after Scenario 8 measured that the KEDA
+> approach can't wake up from zero on its own; this scenario serves the
+> same model through KServe's original Serverless/Knative mode to check
+> whether genuine request-triggered wake-from-zero actually works there).**
 
-**What it shows**: every scenario so far leans on the plain Kubernetes
-scheduler plus integer `nvidia.com/gpu: N` counting (Pending →
-MachineAutoscaler, PriorityClass → preemption, etc). A real multi-tenant
-GPUaaS platform layers **Kueue** (job queueing — per-team quota, fair
-sharing, and priority, managed *before* the scheduler ever gets involved) and
-**DRA** (Dynamic Resource Allocation — the modern Kubernetes-standard way of
-requesting/allocating GPUs via a structured `ResourceClaim` API instead of
-the old device-plugin integer count, GA in OpenShift since 4.21) on top of
-that.
+**What it shows**: flips Scenario 8's honestly-documented limitation
+(replica 0 + a request in = KEDA never notices, and the request itself
+fails at DNS resolution) around, to check whether **Knative's Activator
+sitting in the request path** actually solves it. Same model
+(`Qwen/Qwen2.5-0.5B-Instruct`), same vLLM configuration, deployed both ways
+(RawDeployment+KEDA vs. Serverless+Knative) side by side — the point being
+this is the deployment mode KServe's scale-to-zero was actually designed
+around.
 
-**Note — no MIG (GPU slicing) here**: one of DRA's headline use cases is
-pairing with NVIDIA MIG (splitting one GPU into several). This cluster's GPU
-flavors (A10G, L4) **don't support MIG in hardware** (MIG needs dedicated
-partitioning circuitry that only ships on A100/H100-class datacenter
-parts — confirmed 2026-08-20). So this scenario is not about slicing a GPU
-into pieces; it's about showing that even a request for one whole GPU goes
-through Kueue's queue/quota and gets allocated via DRA's structured claim
-API.
+**Setup (planned)**:
+- Install the OpenShift Serverless Operator (Knative Serving) — giving up
+  the Service Mesh avoidance this time, since it's actually needed. Modern
+  Knative Serving can often run on a lighter networking layer like Kourier
+  without full Service Mesh, though — verify against this actual cluster
+  rather than assuming either way.
+- Deploy the InferenceService with `serving.kserve.io/deploymentMode:
+  Serverless` (instead of RawDeployment) — reusing everything already
+  confirmed working in Scenario 8 (`--enforce-eager`, 12Gi memory, same
+  model).
+- Autoscaling is handled by KServe's own Knative-based autoscaler — no KEDA,
+  no `autoscalerClass: external` annotation needed (Knative is the default).
 
-**Flow (planned)**:
-1. Install Kueue (the Red Hat build of Kueue) — configure a `ClusterQueue`
-   with a GPU quota per team `LocalQueue` (its resource flavor references a
-   DRA `DeviceClass`).
-2. Two teams submit several GPU-requesting Jobs at once, together exceeding
-   the quota.
-3. The Jobs over quota **sit in Kueue's admission queue** — never even
-   handed to the scheduler (not "Pending on the scheduler," genuinely held
-   back by Kueue) — `kubectl get workloads` distinguishes Admitted from
-   queued.
-4. Once an earlier Job finishes and frees quota, a queued Job is admitted
-   automatically per Kueue's fair-share/priority rules.
-5. The actual GPU allocation happens via `ResourceClaim`/`ResourceSlice`
-   (DRA objects) — visibly a structured claim, not a bare
-   `nvidia.com/gpu: 1` integer request.
+**To validate**: send a real inference request while at 0 replicas and
+confirm the Activator actually buffers it until a pod comes up, and that
+the response succeeds (even with some cold-start latency). Measure the
+cold-start latency and compare directly against Scenario 8 under the same
+conditions (same model, same hardware) — a table of: automatic 0→1?,
+request succeeds during cold start?, extra operators/complexity required.
 
-**Harness implementation not written yet**: Kueue/DRA's exact CRD fields and
-API versions will be confirmed against this cluster's actual installed
-versions before any scripts get written — no speculative YAML, same
-verify-against-the-real-cluster discipline used throughout this session.
-
-Sources: [Improve GPU utilization with Kueue in OpenShift AI](https://developers.redhat.com/articles/2025/05/22/improve-gpu-utilization-kueue-openshift-ai),
-[Dynamic resource allocation goes GA in Red Hat OpenShift 4.21](https://developers.redhat.com/articles/2026/03/25/dynamic-resource-allocation-goes-ga-red-hat-openshift-421-smarter-gpu),
-[Multitenant AI inference with dynamic resource allocation on OpenShift](https://developers.redhat.com/articles/2026/08/03/multitenant-ai-inference-dynamic-resource-allocation-openshift)
+**Harness implementation not written yet** — tomorrow. Whether Knative
+Serving needs full Service Mesh on this specific cluster is unconfirmed;
+verify first rather than assuming either way.
 
 ---
 
@@ -756,6 +744,65 @@ dies:
 **Harness implementation not written yet** — needs Scenario 8's actual
 InferenceService/ScaledObject running first to build real dashboard panels,
 alerts, and the logging pipeline against, verified live rather than guessed.
+
+---
+
+## Scenario 11 — Kueue + Dynamic Resource Allocation (DRA)
+
+> **Status: design confirmed, harness implementation and live validation in
+> progress (2026-08-20 — the original version was MachineAutoscaler-based
+> "dynamic allocation + reclaim," but that idea is already covered
+> separately by Scenario 1 (allocation) and the old Scenario 8 (reclaim), so
+> this was redesigned to show a genuinely more sophisticated GPUaaS
+> scheduling layer instead: Kueue + DRA. Pushed back to 11 on 2026-08-20 once
+> Scenarios 8-9 filled up with the KServe scale-to-zero comparison, KEDA vs.
+> Knative).**
+
+**What it shows**: every scenario so far leans on the plain Kubernetes
+scheduler plus integer `nvidia.com/gpu: N` counting (Pending →
+MachineAutoscaler, PriorityClass → preemption, etc). A real multi-tenant
+GPUaaS platform layers **Kueue** (job queueing — per-team quota, fair
+sharing, and priority, managed *before* the scheduler ever gets involved) and
+**DRA** (Dynamic Resource Allocation — the modern Kubernetes-standard way of
+requesting/allocating GPUs via a structured `ResourceClaim` API instead of
+the old device-plugin integer count, GA in OpenShift since 4.21) on top of
+that.
+
+**Note — no MIG (GPU slicing) here**: one of DRA's headline use cases is
+pairing with NVIDIA MIG (splitting one GPU into several). This cluster's GPU
+flavors (A10G, L4, and the T4 in g4dn.xlarge) **don't support MIG in
+hardware** (MIG needs dedicated partitioning circuitry that only ships on
+A100/H100-class datacenter parts — confirmed 2026-08-20). So this scenario
+is not about slicing a GPU into pieces; it's about showing that even a
+request for one whole GPU goes through Kueue's queue/quota and gets
+allocated via DRA's structured claim API. (Note: sharing one GPU across
+multiple pods *without* MIG is possible via the separate mechanism of
+NVIDIA time-slicing — the idea raised in Scenario 8's discussion.)
+
+**Flow (planned)**:
+1. Install Kueue (the Red Hat build of Kueue) — configure a `ClusterQueue`
+   with a GPU quota per team `LocalQueue` (its resource flavor references a
+   DRA `DeviceClass`).
+2. Two teams submit several GPU-requesting Jobs at once, together exceeding
+   the quota.
+3. The Jobs over quota **sit in Kueue's admission queue** — never even
+   handed to the scheduler (not "Pending on the scheduler," genuinely held
+   back by Kueue) — `kubectl get workloads` distinguishes Admitted from
+   queued.
+4. Once an earlier Job finishes and frees quota, a queued Job is admitted
+   automatically per Kueue's fair-share/priority rules.
+5. The actual GPU allocation happens via `ResourceClaim`/`ResourceSlice`
+   (DRA objects) — visibly a structured claim, not a bare
+   `nvidia.com/gpu: 1` integer request.
+
+**Harness implementation not written yet**: Kueue/DRA's exact CRD fields and
+API versions will be confirmed against this cluster's actual installed
+versions before any scripts get written — no speculative YAML, same
+verify-against-the-real-cluster discipline used throughout this session.
+
+Sources: [Improve GPU utilization with Kueue in OpenShift AI](https://developers.redhat.com/articles/2025/05/22/improve-gpu-utilization-kueue-openshift-ai),
+[Dynamic resource allocation goes GA in Red Hat OpenShift 4.21](https://developers.redhat.com/articles/2026/03/25/dynamic-resource-allocation-goes-ga-red-hat-openshift-421-smarter-gpu),
+[Multitenant AI inference with dynamic resource allocation on OpenShift](https://developers.redhat.com/articles/2026/08/03/multitenant-ai-inference-dynamic-resource-allocation-openshift)
 
 ---
 

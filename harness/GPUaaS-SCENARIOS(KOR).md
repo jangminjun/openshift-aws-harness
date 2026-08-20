@@ -596,53 +596,44 @@ Sources: [How to set up KServe autoscaling for vLLM with KEDA](https://developer
 
 ---
 
-## 시나리오 9 — Kueue + Dynamic Resource Allocation (DRA)
+## 시나리오 9 — KServe Serverless(Knative) + vLLM 진짜 Scale-to-Zero
 
-> **상태: 설계 확정, harness 구현·실측 검증 진행 중 (2026-08-20 작성 — 이전
-> 버전은 MachineAutoscaler 기반 "동적 할당 + 회수"였는데, 그 발상 자체는
-> 시나리오 1(할당)·시나리오 8의 옛 버전(회수)로 이미 각각 다뤄지고 있어서,
-> 대신 Kueue + DRA라는 더 진짜 GPUaaS 플랫폼다운 스케줄링 계층을 보여주는
-> 쪽으로 새로 설계함).**
+> **상태: 설계 확정, 내일 구현 예정 (2026-08-20 작성 — 시나리오 8에서
+> KEDA 방식이 0에서 요청이 와도 자동으로 못 깨어난다는 걸 실측으로 확인한
+> 직후, 같은 모델을 KServe 원래 방식인 Knative Serverless 모드로 서빙해서
+> "진짜 요청 기반 wake-from-zero"가 실제로 되는지 나란히 비교하기 위해
+> 설계함).**
 
-**보여주는 것**: 지금까지의 시나리오들은 전부 Kubernetes 기본 스케줄러 +
-`nvidia.com/gpu: N` 정수 카운팅에 의존한다 (Pending → MachineAutoscaler,
-PriorityClass → Preemption 등). 진짜 멀티테넌트 GPUaaS 플랫폼은 그 위에
-**Kueue**(작업 큐잉 — 팀별 쿼터·공정 분배·우선순위를 스케줄러 이전 단계에서
-관리)와 **DRA**(Dynamic Resource Allocation — GPU를 device-plugin의 단순
-정수 카운팅이 아니라 `ResourceClaim`이라는 구조화된 API로 요청/할당하는
-Kubernetes 최신 표준 방식, OpenShift 4.21부터 GA)를 올려서 훨씬 정교하게
-관리한다.
+**보여주는 것**: 시나리오 8이 정직하게 드러낸 한계(replica 0일 때 요청이
+와도 KEDA는 감지도 못 하고 응답도 DNS 단계에서부터 실패)를 그대로
+뒤집어서, **Knative의 Activator가 요청 경로에 있으면 실제로 되는지**
+확인한다. 같은 모델(`Qwen/Qwen2.5-0.5B-Instruct`)·같은 vLLM 설정을 두
+배포 모드(RawDeployment+KEDA vs Serverless+Knative)로 나란히 놓고
+비교하는 게 핵심 — "이게 원래 KServe가 scale-to-zero를 하도록 설계된
+방식"이라는 것을 직접 보여준다.
 
-**주의 — MIG(GPU 슬라이싱)는 이 시나리오에 안 들어감**: DRA가 유명한 이유
-중 하나가 NVIDIA MIG(GPU 하나를 여러 개로 쪼개 쓰는 것)와의 조합인데,
-이 클러스터의 GPU 플레이버(A10G, L4)는 **하드웨어 자체가 MIG를 지원하지
-않는다**(MIG는 A100/H100급 데이터센터 GPU 전용 회로가 있어야 함 — 실측
-확인 완료, 2026-08-20). 그래서 이 시나리오는 "GPU를 쪼개 쓰기"가 아니라,
-**온전한 GPU 한 장 단위 요청도 Kueue의 큐/쿼터를 거쳐서, DRA의 구조화된
-클레임 API로 할당된다**는 부분에 집중한다.
+**구성 (계획)**:
+- OpenShift Serverless Operator(Knative Serving) 설치 — 이번엔 Service
+  Mesh 회피를 포기하고 실제로 필요한 걸 설치한다. 다만 최신 Knative
+  Serving은 Kourier 같은 가벼운 네트워킹 레이어로 **Service Mesh 없이도**
+  설치 가능한 경우가 많아서, 정말 Service Mesh까지 필요한지 이 클러스터
+  기준으로 직접 확인할 것 (추측 금지)
+- `InferenceService`를 `serving.kserve.io/deploymentMode: Serverless`로
+  배포 (RawDeployment 대신) — 시나리오 8에서 이미 확인된 값 재사용
+  (`--enforce-eager`, 메모리 12Gi, 같은 모델)
+- 오토스케일링은 KServe 자체 Knative 기반 오토스케일러가 담당 — KEDA도,
+  `autoscalerClass: external` 어노테이션도 필요 없음(기본값이 Knative)
 
-**흐름 (계획)**:
-1. Kueue(Red Hat build of Kueue) 설치 — 팀별 `LocalQueue` + GPU 쿼터를 가진
-   `ClusterQueue` 구성 (리소스 플레이버는 DRA `DeviceClass`를 참조)
-2. 두 팀이 동시에 GPU를 요청하는 Job을 여러 개 제출 — 합쳐서 쿼터 초과
-3. 쿼터를 넘는 Job들은 스케줄러한테 넘어가기도 전에 **Kueue admission
-   단계에서 대기열에 그대로 머무름** (Pending으로 스케줄러가 붙잡는 게
-   아니라, Kueue가 애초에 스케줄러에 넘기지 않음) — `kubectl get workloads`로
-   Admitted vs 대기 중인 워크로드를 구분해서 보여줌
-4. 앞선 Job이 끝나서 쿼터가 비면 대기 중이던 Job이 **공정 분배/우선순위
-   규칙에 따라** 자동으로 admit됨
-5. 실제 GPU 할당은 `ResourceClaim`/`ResourceSlice`(DRA 오브젝트)로 이뤄짐 —
-   `nvidia.com/gpu: 1` 같은 구식 정수 요청이 아니라 구조화된 클레임인 걸
-   직접 확인
+**검증할 것**: replica 0인 상태에서 실제 추론 요청을 보내서 — Activator가
+요청을 붙잡아뒀다가 pod가 뜨면 넘겨주는지, 응답이 (콜드스타트 지연은
+있더라도) 실제로 성공하는지 확인. 콜드스타트 지연시간을 실측하고, 시나리오
+8과 정확히 같은 조건(같은 모델, 같은 하드웨어)에서 비교표로 정리 —
+0→1 자동 여부, 콜드스타트 시 요청 성공 여부, 설치 복잡도/추가 오퍼레이터
+수.
 
-**harness 구현은 아직**: Kueue/DRA의 정확한 CRD 필드·API 버전을 이
-클러스터의 실제 설치본 기준으로 확인한 뒤 스크립트를 작성할 예정 —
-추측으로 YAML을 먼저 쓰지 않고, 이번 세션에서 계속 해온 대로 실제
-클러스터에서 검증하며 만든다.
-
-Sources: [Improve GPU utilization with Kueue in OpenShift AI](https://developers.redhat.com/articles/2025/05/22/improve-gpu-utilization-kueue-openshift-ai),
-[Dynamic resource allocation goes GA in Red Hat OpenShift 4.21](https://developers.redhat.com/articles/2026/03/25/dynamic-resource-allocation-goes-ga-red-hat-openshift-421-smarter-gpu),
-[Multitenant AI inference with dynamic resource allocation on OpenShift](https://developers.redhat.com/articles/2026/08/03/multitenant-ai-inference-dynamic-resource-allocation-openshift)
+**harness 구현은 아직**: 내일 진행. Knative Serving 설치가 이 클러스터의
+Service Mesh 상황(있는지, 필요한지)에 따라 달라질 수 있어서 추측 없이
+직접 확인 후 작성.
 
 ---
 
@@ -702,6 +693,60 @@ Prometheus/Thanos가 외부에 저장하니 pod 재시작과 무관하게 살아
 **harness 구현은 아직**: 시나리오 8의 실제 InferenceService/ScaledObject가
 떠 있어야 진짜 대시보드 패널/알람/로깅 파이프라인을 실제로 만들고 검증할
 수 있어서, 추측 없이 실제 환경에서 만들 예정.
+
+---
+
+## 시나리오 11 — Kueue + Dynamic Resource Allocation (DRA)
+
+> **상태: 설계 확정, harness 구현·실측 검증 진행 중 (2026-08-20 작성 — 이전
+> 버전은 MachineAutoscaler 기반 "동적 할당 + 회수"였는데, 그 발상 자체는
+> 시나리오 1(할당)·시나리오 8의 옛 버전(회수)로 이미 각각 다뤄지고 있어서,
+> 대신 Kueue + DRA라는 더 진짜 GPUaaS 플랫폼다운 스케줄링 계층을 보여주는
+> 쪽으로 새로 설계함. 2026-08-20에 8·9번이 KServe scale-to-zero 비교
+> (KEDA vs Knative)로 채워지면서 뒤로 밀림).**
+
+**보여주는 것**: 지금까지의 시나리오들은 전부 Kubernetes 기본 스케줄러 +
+`nvidia.com/gpu: N` 정수 카운팅에 의존한다 (Pending → MachineAutoscaler,
+PriorityClass → Preemption 등). 진짜 멀티테넌트 GPUaaS 플랫폼은 그 위에
+**Kueue**(작업 큐잉 — 팀별 쿼터·공정 분배·우선순위를 스케줄러 이전 단계에서
+관리)와 **DRA**(Dynamic Resource Allocation — GPU를 device-plugin의 단순
+정수 카운팅이 아니라 `ResourceClaim`이라는 구조화된 API로 요청/할당하는
+Kubernetes 최신 표준 방식, OpenShift 4.21부터 GA)를 올려서 훨씬 정교하게
+관리한다.
+
+**주의 — MIG(GPU 슬라이싱)는 이 시나리오에 안 들어감**: DRA가 유명한 이유
+중 하나가 NVIDIA MIG(GPU 하나를 여러 개로 쪼개 쓰는 것)와의 조합인데,
+이 클러스터의 GPU 플레이버(A10G, L4, g4dn.xlarge의 T4 포함)는 **하드웨어
+자체가 MIG를 지원하지 않는다**(MIG는 A100/H100급 데이터센터 GPU 전용
+회로가 있어야 함 — 실측 확인 완료, 2026-08-20). 그래서 이 시나리오는
+"GPU를 쪼개 쓰기"가 아니라, **온전한 GPU 한 장 단위 요청도 Kueue의
+큐/쿼터를 거쳐서, DRA의 구조화된 클레임 API로 할당된다**는 부분에
+집중한다. (참고: MIG 없이 여러 pod가 GPU 하나를 나눠 쓰는 건 별도
+메커니즘인 NVIDIA time-slicing으로 가능 — 시나리오 8에서 언급된
+아이디어.)
+
+**흐름 (계획)**:
+1. Kueue(Red Hat build of Kueue) 설치 — 팀별 `LocalQueue` + GPU 쿼터를 가진
+   `ClusterQueue` 구성 (리소스 플레이버는 DRA `DeviceClass`를 참조)
+2. 두 팀이 동시에 GPU를 요청하는 Job을 여러 개 제출 — 합쳐서 쿼터 초과
+3. 쿼터를 넘는 Job들은 스케줄러한테 넘어가기도 전에 **Kueue admission
+   단계에서 대기열에 그대로 머무름** (Pending으로 스케줄러가 붙잡는 게
+   아니라, Kueue가 애초에 스케줄러에 넘기지 않음) — `kubectl get workloads`로
+   Admitted vs 대기 중인 워크로드를 구분해서 보여줌
+4. 앞선 Job이 끝나서 쿼터가 비면 대기 중이던 Job이 **공정 분배/우선순위
+   규칙에 따라** 자동으로 admit됨
+5. 실제 GPU 할당은 `ResourceClaim`/`ResourceSlice`(DRA 오브젝트)로 이뤄짐 —
+   `nvidia.com/gpu: 1` 같은 구식 정수 요청이 아니라 구조화된 클레임인 걸
+   직접 확인
+
+**harness 구현은 아직**: Kueue/DRA의 정확한 CRD 필드·API 버전을 이
+클러스터의 실제 설치본 기준으로 확인한 뒤 스크립트를 작성할 예정 —
+추측으로 YAML을 먼저 쓰지 않고, 이번 세션에서 계속 해온 대로 실제
+클러스터에서 검증하며 만든다.
+
+Sources: [Improve GPU utilization with Kueue in OpenShift AI](https://developers.redhat.com/articles/2025/05/22/improve-gpu-utilization-kueue-openshift-ai),
+[Dynamic resource allocation goes GA in Red Hat OpenShift 4.21](https://developers.redhat.com/articles/2026/03/25/dynamic-resource-allocation-goes-ga-red-hat-openshift-421-smarter-gpu),
+[Multitenant AI inference with dynamic resource allocation on OpenShift](https://developers.redhat.com/articles/2026/08/03/multitenant-ai-inference-dynamic-resource-allocation-openshift)
 
 ---
 
