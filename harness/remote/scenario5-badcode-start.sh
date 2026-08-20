@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Scenario 5: bad-code / DataLoader bottleneck detection. Deploys two pods
-# running the SAME training loop against a synthetic "slow" Dataset (0.2s
-# per-sample delay simulating real decode/augment cost) -- one with
+# Scenario 5: bad-code / DataLoader bottleneck detection. Runs the SAME
+# training loop against a synthetic "slow" Dataset (0.2s per-sample delay
+# simulating real decode/augment cost) twice, SEQUENTIALLY -- once with
 # num_workers=0 (serial: GPU idles while each sample is fetched one at a
-# time), one with num_workers=4 (parallel prefetch: workers prepare the next
-# batch in the background while the GPU computes the current one). Both
-# workloads and results are directly comparable on the same dashboard.
+# time), once with num_workers=4 (parallel prefetch: workers prepare the
+# next batch in the background while the GPU computes the current one) --
+# and compares throughput. Sequential rather than side-by-side because this
+# cluster's GPU MachineSet is capped at 1 node (AWS G/VT vCPU quota; see
+# AGENT.md), so only one of the two pods can hold the single GPU at a time.
 # Idempotent.
 set -euo pipefail
 export KUBECONFIG="$HOME/ocp-install/auth/kubeconfig"
@@ -14,6 +16,7 @@ DEMO_NAMESPACE="${DEMO_NAMESPACE:-gpu-badcode-scenario-5}"
 PER_SAMPLE_SLEEP="${PER_SAMPLE_SLEEP:-0.2}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 GOOD_NUM_WORKERS="${GOOD_NUM_WORKERS:-4}"
+OBSERVE_SECONDS="${OBSERVE_SECONDS:-60}"
 
 TRAIN_SCRIPT='
 from torch.utils.data import Dataset, DataLoader
@@ -87,6 +90,36 @@ $(echo "$TRAIN_SCRIPT" | sed 's/^/      /')
 YAML
 }
 
+# Deploys $1 with num_workers=$2, waits for it to run, observes it for
+# OBSERVE_SECONDS, then deletes it and sets RESULT_STEPS to the last step
+# count reached. Sets a global (not a command-substitution return value) so
+# its progress echoes print live instead of being swallowed by a capture pipe.
+RESULT_STEPS=0
+run_and_measure() {
+  local name="$1" num_workers="$2"
+  deploy_pod "$name" "$num_workers"
+
+  echo "Waiting for ${name} to start Running..."
+  local phase node
+  for _ in $(seq 1 40); do
+    phase=$(oc get pod "$name" -n "${DEMO_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    [ "$phase" = "Running" ] && break
+    sleep 5
+  done
+  node=$(oc get pod "$name" -n "${DEMO_NAMESPACE}" -o jsonpath='{.spec.nodeName}' 2>/dev/null || echo "<pending>")
+  echo "${name}: phase=${phase:-Unknown} node=${node}"
+
+  echo "Observing ${name} for ${OBSERVE_SECONDS}s (num_workers=${num_workers})..."
+  sleep "$OBSERVE_SECONDS"
+
+  local last_step
+  last_step=$(oc logs "$name" -n "${DEMO_NAMESPACE}" 2>/dev/null | grep -oE 'step=[0-9]+' | tail -1 | cut -d= -f2)
+  echo "${name}: reached ${last_step:-0} steps in ${OBSERVE_SECONDS}s"
+
+  oc delete pod "$name" -n "${DEMO_NAMESPACE}" --ignore-not-found >/dev/null
+  RESULT_STEPS="${last_step:-0}"
+}
+
 oc apply -f - <<YAML
 apiVersion: v1
 kind: Namespace
@@ -96,23 +129,20 @@ metadata:
     team: demo-team-a
 YAML
 
-deploy_pod "bad-code-workload" 0
-deploy_pod "efficient-workload" "${GOOD_NUM_WORKERS}"
-
-echo "Waiting for both pods to start Running..."
-for name in bad-code-workload efficient-workload; do
-  for _ in $(seq 1 40); do
-    PHASE=$(oc get pod "$name" -n "${DEMO_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
-    [ "$PHASE" = "Running" ] && break
-    sleep 5
-  done
-  NODE=$(oc get pod "$name" -n "${DEMO_NAMESPACE}" -o jsonpath='{.spec.nodeName}' 2>/dev/null || echo "<pending>")
-  echo "${name}: phase=${PHASE:-Unknown} node=${NODE}"
-done
+echo "=== Phase 1/2: bad-code-workload (num_workers=0) ==="
+run_and_measure "bad-code-workload" 0
+BAD_STEPS="$RESULT_STEPS"
 
 echo ""
-echo "bad-code-workload   : num_workers=0 (serial fetch, GPU idles between batches)"
-echo "efficient-workload  : num_workers=${GOOD_NUM_WORKERS} (parallel prefetch, GPU stays busier)"
-echo "Watch: oc logs -f bad-code-workload -n ${DEMO_NAMESPACE}"
-echo "       oc logs -f efficient-workload -n ${DEMO_NAMESPACE}"
+echo "=== Phase 2/2: efficient-workload (num_workers=${GOOD_NUM_WORKERS}) ==="
+run_and_measure "efficient-workload" "${GOOD_NUM_WORKERS}"
+GOOD_STEPS="$RESULT_STEPS"
+
+echo ""
+echo "=== Result (${OBSERVE_SECONDS}s each, sequential -- only 1 GPU node available) ==="
+echo "bad-code-workload  (num_workers=0): ${BAD_STEPS} steps"
+echo "efficient-workload (num_workers=${GOOD_NUM_WORKERS}): ${GOOD_STEPS} steps"
+if [ "${BAD_STEPS:-0}" -gt 0 ]; then
+  echo "speedup: $(echo "scale=1; ${GOOD_STEPS:-0} / ${BAD_STEPS}" | bc)x"
+fi
 echo "Grafana Tier1 -> GPU Compute vs Memory Utilization (Cluster Avg) / Tier2 -> Stall Pattern panel"

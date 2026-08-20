@@ -311,7 +311,11 @@ uncordon을 같이 처리하므로, 트리거 도중에 중단하더라도 이 �
 
 ## 시나리오 5 — 비효율 코드 탐지 (Bad Code Penalty)
 
-> **상태: harness 반영 + 실측 검증 완료 (2026-08-14).**
+> **상태: harness 반영 + 실측 검증 완료 (2026-08-14, 이후 2026-08-20에 순차
+> 실행 방식으로 재작성 — 새 AWS 샌드박스 계정의 G/VT vCPU 쿼터가 4라서
+> GPU 노드를 동시에 1대만 띄울 수 있어, 원래의 "두 pod 동시 실행 후 비교"
+> 방식이 그대로는 안 됨. 아래 실측 결과는 이전(2대 동시 가능했던) 계정
+> 기준이고, 순차 실행 버전의 재검증은 아직 전).**
 > PriorityClass 하향 + Preemption 실효성 증명은 [시나리오 6](#시나리오-6--priorityclass-하향-및-preemption-실효성-증명)에서 이어짐.
 
 **보여주는 것**: 똑같은 학습 코드인데 `DataLoader`의 `num_workers` 설정
@@ -339,24 +343,28 @@ PyTorch 메커니즘으로 재현한다 (인위적인 `sleep`으로 흉내내는
   크래시한다 — pod에 `emptyDir(medium: Memory, sizeLimit: 1Gi)`를
   `/dev/shm`에 마운트해서 해결함 (2026-08-14 실측으로 발견/수정)
 
-**실행**:
+**실행 (순차 버전, GPU 노드 1대 기준)**: `scenario5-badcode-start` 하나가
+`bad-code-workload`를 배포 → `OBSERVE_SECONDS`(기본 60초) 관찰 → step 수
+기록 → 삭제 → 곧바로 `efficient-workload` 배포 → 같은 시간 관찰 → 삭제 →
+마지막에 두 결과를 나란히 출력한다 (GPU 1장이라 동시 실행이 안 되니, 같은
+시간 동안 각각 따로 재서 비교).
 ```bash
 # 로컬에서
-./harness.sh scenario5-badcode-start
-./harness.sh scenario5-badcode-stop
+./harness.sh scenario5-badcode-start      # 두 워크로드를 순차로 돌리고 처리량 비교까지 자동 출력
+./harness.sh scenario5-badcode-stop       # 안전망 (start가 이미 각 단계에서 정리함)
 
-# 또는 bastion에서 직접
-oc logs -f bad-code-workload -n gpu-badcode-scenario-5
-oc logs -f efficient-workload -n gpu-badcode-scenario-5
+# 관찰 시간 조정
+OBSERVE_SECONDS=120 ./harness.sh scenario5-badcode-start
 ```
 
 **지켜볼 것**:
-- `oc logs` — 같은 시간 동안 `efficient-workload`가 `bad-code-workload`보다
-  스텝이 훨씬 빨리 올라감 (처리량 차이)
+- `scenario5-badcode-start` 자체 출력 — 각 워크로드가 같은 시간 동안 몇
+  step까지 갔는지, 배율(speedup)까지 마지막에 계산해서 보여줌
 - Grafana Tier1 "GPU Compute vs Memory Utilization (Cluster Avg)" / Tier2
-  "Stall Pattern: High Memory, Low Compute" 패널
+  "Stall Pattern: High Memory, Low Compute" 패널 — 두 구간의 이용률 차이를
+  시간순으로 확인 가능
 
-**실측 결과** (2026-08-14, 4분간 관찰):
+**실측 결과 (이전 계정 · 동시 실행 버전, 2026-08-14, 4분간 관찰)**:
 
 | 워크로드 | 처리량(스텝, 동일 시간) | 평균 GPU_UTIL | 평균 MEM_COPY_UTIL |
 |---|---|---|---|

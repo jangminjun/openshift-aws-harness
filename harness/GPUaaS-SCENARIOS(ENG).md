@@ -336,7 +336,13 @@ returns the cluster to a clean state.
 
 ## Scenario 5 — Bad Code Detection (Bad Code Penalty)
 
-> **Status: fully wired into the harness + measurement-validated (2026-08-14).**
+> **Status: fully wired into the harness + measurement-validated (2026-08-14,
+> rewritten to run sequentially on 2026-08-20 — the new AWS sandbox account's
+> G/VT vCPU quota is 4, so only 1 GPU node can exist at a time and the
+> original "both pods running side by side" approach no longer works. The
+> measured results below are from the earlier account, where 2 concurrent
+> GPU pods were possible; the sequential version hasn't been re-validated
+> yet).**
 
 **What it shows**: how much a single `DataLoader` setting — `num_workers` —
 can idle an expensive GPU, using the exact same training code, measured and
@@ -364,24 +370,30 @@ real-world cause of — and fix for — "why is my GPU utilization so low."
   `emptyDir(medium: Memory, sizeLimit: 1Gi)` at `/dev/shm` (found and fixed
   via measurement on 2026-08-14)
 
-**Run**:
+**Run (sequential version, single-GPU-node clusters)**: a single
+`scenario5-badcode-start` deploys `bad-code-workload`, observes it for
+`OBSERVE_SECONDS` (default 60s), records its step count, deletes it, then
+immediately deploys `efficient-workload`, observes it for the same duration,
+deletes it, and prints both results side by side (can't run concurrently
+with only 1 GPU, so each is timed separately over the same duration
+instead).
 ```bash
 # locally
-./harness.sh scenario5-badcode-start
-./harness.sh scenario5-badcode-stop
+./harness.sh scenario5-badcode-start      # runs both workloads sequentially, prints the comparison
+./harness.sh scenario5-badcode-stop       # safety net (start already cleans up after each phase)
 
-# or directly on the bastion
-oc logs -f bad-code-workload -n gpu-badcode-scenario-5
-oc logs -f efficient-workload -n gpu-badcode-scenario-5
+# adjust the observation window
+OBSERVE_SECONDS=120 ./harness.sh scenario5-badcode-start
 ```
 
 **Watch**:
-- `oc logs` — over the same wall-clock time, `efficient-workload`'s step
-  counter climbs far faster than `bad-code-workload`'s (throughput gap)
+- `scenario5-badcode-start`'s own output — steps reached by each workload
+  over the same duration, plus a computed speedup at the end
 - Grafana Tier1 "GPU Compute vs Memory Utilization (Cluster Avg)" / Tier2
-  "Stall Pattern: High Memory, Low Compute" panel
+  "Stall Pattern: High Memory, Low Compute" panel — compare utilization
+  across the two time windows
 
-**Measured result** (2026-08-14, observed over 4 minutes):
+**Measured result (previous account · concurrent version, 2026-08-14, observed over 4 minutes)**:
 
 | Workload | Throughput (steps, same time) | Avg GPU_UTIL | Avg MEM_COPY_UTIL |
 |---|---|---|---|
