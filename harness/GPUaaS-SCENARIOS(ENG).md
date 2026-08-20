@@ -531,7 +531,7 @@ standing one up is a separate MachineSet exercise out of scope here.
 
 ---
 
-## Scenario 8 — KServe + vLLM Scale-to-Zero
+## Scenario 8 — KServe + vLLM Scale-Down on Idle
 
 > **Status: wired into the harness + measurement-validated. Scale-down
 > works correctly; scale-up has a confirmed structural limitation
