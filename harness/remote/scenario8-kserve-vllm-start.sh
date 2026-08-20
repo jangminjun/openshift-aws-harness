@@ -23,6 +23,25 @@
 #   new one. This script's re-run is idempotent for a clean deploy, but a
 #   mid-flight spec edit needs the same manual RS cleanup as when this was
 #   first debugged.
+#
+# IN-PROGRESS EXPLORATION (not yet baked into this script, done manually on
+# the live cluster 2026-08-20 -- see chat history / next session):
+# - NVIDIA GPU time-slicing (a ConfigMap + ClusterPolicy patch on
+#   nvidia.com/gpu, unrelated to MIG, works on any NVIDIA GPU incl. T4) lets
+#   this single physical GPU report as 2 schedulable nvidia.com/gpu units,
+#   confirmed working (node allocatable went 1 -> 2 within ~20s). Paired
+#   with maxReplicaCount=2 and --gpu-memory-utilization=0.4 (so 2 instances
+#   fit in the same VRAM), this should let the demo show a 0/1/2 replica
+#   curve instead of just 0/1 -- not yet fully scripted or validated.
+# - IMPORTANT finding: a manual `oc scale deploy --replicas=N` does NOT
+#   stick once a KEDA ScaledObject targets that Deployment -- KEDA
+#   reconciles it back to its own calculated target (or minReplicaCount, if
+#   set) within ~15s (one polling interval). This means
+#   scenario8-kserve-vllm-load.sh's "manually scale up from 0" step is only
+#   reliable if the request/readiness check completes before KEDA's next
+#   poll reverts it -- needs re-validation, possibly needs to pause the
+#   ScaledObject (`oc annotate scaledobject ... autoscaling.keda.sh/paused=true`)
+#   around the manual scale instead of fighting KEDA directly.
 set -euo pipefail
 export KUBECONFIG="$HOME/ocp-install/auth/kubeconfig"
 
