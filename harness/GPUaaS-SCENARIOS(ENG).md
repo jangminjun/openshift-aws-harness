@@ -519,121 +519,118 @@ standing one up is a separate MachineSet exercise out of scope here.
 
 ---
 
-## Scenario 8 — Idle GPU Reclaim
+## Scenario 8 — KServe + vLLM Scale-to-Zero
 
-> **Status: wired into the harness; not yet measurement-validated on a fresh cluster (written 2026-08-20).**
+> **Status: design confirmed (grounded in an officially-documented Red Hat
+> pattern), harness implementation and live validation in progress
+> (2026-08-20 — the original version was a custom polling script; redesigned
+> to show how the serving platform itself, KServe, solves this natively
+> instead. The polling-based "measure before reclaiming" idea lives on as-is
+> in [Scenario 9](#scenario-9--dynamic-allocation--full-reclaim)).**
 
-**What it shows**: the common case of a team member checking out an
-interactive/dev GPU session (`nvidia.com/gpu: 1` allocated, counted against
-quota) and forgetting about it — the GPU shows as "in use" but nothing is
-actually running on it. The infra team (or an automated controller)
-**measures actual utilization** and only reclaims it once it's genuinely
-idle — the key point being this is a real measurement-based decision, not an
-unconditional delete.
+**What it shows**: in a real GPUaaS platform, an idle GPU shouldn't need a
+human (or a script) watching it and deleting things — **the serving
+platform itself should give it back automatically based on real traffic**.
+Serving a vLLM model through KServe, replicas scale to 0 (full GPU release)
+automatically once requests stop, and scale back up automatically the moment
+a new request arrives.
 
-**How this differs from Scenario 5**: Scenario 5 shows "the code is
-inefficient so the GPU idles often" (it IS being used, just in a bad
-pattern); Scenario 8 covers "nothing is running at all, but the allocation is
-still held" (no usage whatsoever) — and the response differs too: Scenario 5
-downgrades the PriorityClass (proven to have teeth in Scenario 6), Scenario 8
-reclaims the allocation itself so another team can use it immediately.
+**Why KEDA instead of Knative Serverless**: KServe's scale-to-zero is
+normally a feature of its Knative (Serverless) deployment mode, but this
+cluster's RHOAI is deliberately installed in `RawDeployment` mode in
+`remote/rhoai.sh` specifically to avoid a Service Mesh dependency
+(`defaultDeploymentMode: RawDeployment`, `serving.managementState: Removed`).
+RawDeployment doesn't support scale-to-zero on its own — but Red Hat
+documented an officially-supported way to get it anyway in late 2025: add the
+**OpenShift Custom Metrics Autoscaler (KEDA-based) operator**, disable
+KServe's built-in HPA (`serving.kserve.io/autoscalerClass: external`), and
+replace it with a KEDA `ScaledObject` that supports `minReplicaCount: 0` —
+no Service Mesh or Knative required, so it doesn't reverse the earlier
+decision to avoid them.
 
-**Setup**:
-- `idle-workload`: requests 1 GPU, runs one small op to properly finish CUDA
-  initialization (so it looks like a legitimately-allocated session), then
-  sleeps forever — actual utilization drops to near-0% right after that
-  initial op
-- The reclaim decision is based on **multiple real samples** of `nvidia-smi
-  utilization.gpu` (default 10 samples, 1s apart) — the same technique as
-  Scenario 3's power sampling
-- Only **reclaims (deletes the pod)** if the average is below
-  `IDLE_THRESHOLD_PCT` (default 3%); otherwise it just reports "not idle
-  yet" and does nothing — re-running it while something is genuinely
-  computing will never delete it
+**Setup (planned)**:
+- Install `openshift-custom-metrics-autoscaler-operator` (namespace
+  `openshift-keda`, channel `stable`) + a `KedaController` CR
+- Deploy an `InferenceService` serving `Qwen/Qwen2.5-0.5B-Instruct` (a small
+  ~0.5B-parameter public model chosen for fast load/scale-up in a live demo)
+  through RHOAI's actual vLLM `ServingRuntime`, staying in `RawDeployment`
+  mode
+- A `KEDA ScaledObject` triggers on the Thanos Querier vLLM queue metric
+  (`vllm:num_requests_waiting`) or DCGM GPU utilization, scaling 0 ↔ N
+  (default max 2)
 
-**Run**:
+**Run (to be finalized once implemented)**:
 ```bash
 # locally
-./harness.sh scenario8-idle-reclaim-start      # deploy idle-workload
-./harness.sh scenario8-idle-reclaim-trigger    # sample utilization -> reclaim if confirmed idle
-./harness.sh scenario8-idle-reclaim-stop       # cleanup (safe even if trigger already deleted it)
-
-# or directly on the bastion
-~/scenario8-idle-reclaim-start.sh
-~/scenario8-idle-reclaim-trigger.sh
-~/scenario8-idle-reclaim-stop.sh
+./harness.sh scenario8-kserve-vllm-start      # deploy InferenceService + KEDA ScaledObject
+./harness.sh scenario8-kserve-vllm-load       # send a real inference request -> confirm scale-up
+./harness.sh scenario8-kserve-vllm-stop       # cleanup
 ```
 
-**Watch**:
-- `~/scenario8-idle-reclaim-trigger.sh` output — the 10 samples, the
-  average, and whether it reclaimed
-- Grafana Tier1 "GPU Utilization by Node" — confirms that node sits near 0%
-  the whole time
+**To validate**: replicas genuinely start at (or fall back to) 0; sending a
+real inference request makes KEDA scale up and the request succeeds; once
+requests stop, it scales back to 0 after the idle window — all three
+transitions need to be observed live, with the measured scale-up/scale-down
+timings recorded here once done.
 
-**Tuning**: adjust sample count/interval/threshold via `SAMPLES`,
-`SAMPLE_INTERVAL_SEC`, `IDLE_THRESHOLD_PCT` (e.g. `IDLE_THRESHOLD_PCT=10
-./harness.sh scenario8-idle-reclaim-trigger`).
+Sources: [How to set up KServe autoscaling for vLLM with KEDA](https://developers.redhat.com/articles/2025/09/23/how-set-kserve-autoscaling-vllm-keda),
+[Custom Metrics Autoscaler on OpenShift](https://www.redhat.com/en/blog/custom-metrics-autoscaler-on-openshift),
+[Boost AI efficiency with GPU autoscaling on OpenShift](https://developers.redhat.com/articles/2025/08/12/boost-ai-efficiency-gpu-autoscaling-openshift)
 
 ---
 
-## Scenario 9 — Dynamic Allocation + Full Reclaim
+## Scenario 9 — Kueue + Dynamic Resource Allocation (DRA)
 
-> **Status: wired into the harness; not yet measurement-validated on a fresh cluster (written 2026-08-20).**
+> **Status: design confirmed, harness implementation and live validation in
+> progress (2026-08-20 — the original version was MachineAutoscaler-based
+> "dynamic allocation + reclaim," but that idea is already covered
+> separately by Scenario 1 (allocation) and the old Scenario 8 (reclaim), so
+> this was redesigned to show a genuinely more sophisticated GPUaaS
+> scheduling layer instead: Kueue + DRA).**
 
-**What it shows**: chains Scenario 1 (capacity grows automatically on
-demand) and Scenario 8 (capacity is reclaimed automatically, based on real
-measurement, once unused) into one continuous loop — GPU capacity in this
-platform isn't statically provisioned, it expands and contracts on its own
-based on actual demand and actual usage. The core message: the infra team
-never manually manages nodes.
+**What it shows**: every scenario so far leans on the plain Kubernetes
+scheduler plus integer `nvidia.com/gpu: N` counting (Pending →
+MachineAutoscaler, PriorityClass → preemption, etc). A real multi-tenant
+GPUaaS platform layers **Kueue** (job queueing — per-team quota, fair
+sharing, and priority, managed *before* the scheduler ever gets involved) and
+**DRA** (Dynamic Resource Allocation — the modern Kubernetes-standard way of
+requesting/allocating GPUs via a structured `ResourceClaim` API instead of
+the old device-plugin integer count, GA in OpenShift since 4.21) on top of
+that.
 
-**Flow**:
-1. `anchor-workload` is already fully occupying the GPU flavor's one
-   existing node.
-2. `dynamic-workload` requests one more GPU on the same flavor → `Pending`
-   → the `MachineAutoscaler` **dynamically allocates** a node (1→2, the
-   same mechanism as Scenario 1).
-3. Once scheduled on the new node, `dynamic-workload` only finishes CUDA
-   init and immediately goes idle (same pattern as Scenario 8's
-   `idle-workload` — it got the allocation but never actually uses it).
-4. `scenario9-dynamic-reclaim-trigger.sh` **measures real utilization**,
-   and once confirmed idle, reclaims (deletes) `dynamic-workload`.
-5. With nothing left running on that node, the `ClusterAutoscaler` scales
-   it back down automatically after its `unneededTime` (default 10min) —
-   the trigger script also prints a command to force that immediately, for
-   demo speed.
+**Note — no MIG (GPU slicing) here**: one of DRA's headline use cases is
+pairing with NVIDIA MIG (splitting one GPU into several). This cluster's GPU
+flavors (A10G, L4) **don't support MIG in hardware** (MIG needs dedicated
+partitioning circuitry that only ships on A100/H100-class datacenter
+parts — confirmed 2026-08-20). So this scenario is not about slicing a GPU
+into pieces; it's about showing that even a request for one whole GPU goes
+through Kueue's queue/quota and gets allocated via DRA's structured claim
+API.
 
-**Setup**:
-- `anchor-workload`: a permanent job occupying the existing g5.2xlarge node
-  (keeps running the whole time)
-- `dynamic-workload`: requests one more GPU on the same flavor — triggers
-  dynamic allocation, then goes idle right after landing
+**Flow (planned)**:
+1. Install Kueue (the Red Hat build of Kueue) — configure a `ClusterQueue`
+   with a GPU quota per team `LocalQueue` (its resource flavor references a
+   DRA `DeviceClass`).
+2. Two teams submit several GPU-requesting Jobs at once, together exceeding
+   the quota.
+3. The Jobs over quota **sit in Kueue's admission queue** — never even
+   handed to the scheduler (not "Pending on the scheduler," genuinely held
+   back by Kueue) — `kubectl get workloads` distinguishes Admitted from
+   queued.
+4. Once an earlier Job finishes and frees quota, a queued Job is admitted
+   automatically per Kueue's fair-share/priority rules.
+5. The actual GPU allocation happens via `ResourceClaim`/`ResourceSlice`
+   (DRA objects) — visibly a structured claim, not a bare
+   `nvidia.com/gpu: 1` integer request.
 
-**Run**:
-```bash
-# locally
-./harness.sh scenario9-dynamic-reclaim-start      # deploy anchor + dynamic, wait for dynamic allocation
-./harness.sh scenario9-dynamic-reclaim-trigger    # sample utilization -> reclaim + report node scale-down if idle
-./harness.sh scenario9-dynamic-reclaim-stop       # cleanup + force MachineSet back to 1 replica
+**Harness implementation not written yet**: Kueue/DRA's exact CRD fields and
+API versions will be confirmed against this cluster's actual installed
+versions before any scripts get written — no speculative YAML, same
+verify-against-the-real-cluster discipline used throughout this session.
 
-# or directly on the bastion
-~/scenario9-dynamic-reclaim-start.sh
-~/scenario9-dynamic-reclaim-trigger.sh
-~/scenario9-dynamic-reclaim-stop.sh
-```
-
-**Watch**:
-- `oc get pods -n gpu-dynamic-scenario-9 -o wide -w` — `dynamic-workload`
-  going from `Pending` to scheduled on the new node
-- `oc get machineset -n openshift-machine-api | grep g5-2xlarge` — 1→2 on
-  allocation, then back to 1 after reclaim (either after the wait, or
-  immediately via the printed manual command)
-
-**Timing**: dynamic allocation takes the same ~10min as Scenario 1. Reclaim
-itself is immediate (just the sampling time); the node scaling back down
-takes another ~10min under `ClusterAutoscaler`'s default — the trigger
-script prints an `oc scale` shortcut to force it immediately, which is what
-you'll want to use live in a demo.
+Sources: [Improve GPU utilization with Kueue in OpenShift AI](https://developers.redhat.com/articles/2025/05/22/improve-gpu-utilization-kueue-openshift-ai),
+[Dynamic resource allocation goes GA in Red Hat OpenShift 4.21](https://developers.redhat.com/articles/2026/03/25/dynamic-resource-allocation-goes-ga-red-hat-openshift-421-smarter-gpu),
+[Multitenant AI inference with dynamic resource allocation on OpenShift](https://developers.redhat.com/articles/2026/08/03/multitenant-ai-inference-dynamic-resource-allocation-openshift)
 
 ---
 

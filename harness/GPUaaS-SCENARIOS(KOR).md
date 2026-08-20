@@ -483,109 +483,108 @@ pod 자체가 생성조차 안 됨(`oc get pods`에 안 뜸) — 스케줄러가
 
 ---
 
-## 시나리오 8 — 유휴 GPU 회수 (Idle Reclaim)
+## 시나리오 8 — KServe + vLLM 유휴 회수 (Scale-to-Zero)
 
-> **상태: harness에 반영 완료, 새 클러스터에서 실측 검증은 아직 전 (2026-08-20 작성).**
+> **상태: 설계 확정(플랫폼 공식 지원 패턴 기준), harness 구현·실측 검증 진행 중
+> (2026-08-20 작성 — 최초 버전은 커스텀 폴링 스크립트였으나, 실제 서빙
+> 플랫폼(KServe)이 이 문제를 어떻게 네이티브로 푸는지 보여주는 쪽으로
+> 재설계함. 폴링 기반 "실측 후 회수" 아이디어 자체는 [시나리오 9](#시나리오-9--동적-할당--전체-자원-회수-dynamic-allocation--full-reclaim)에
+> 그대로 살아있음).**
 
-**보여주는 것**: 팀원이 인터랙티브/개발용 GPU 세션을 잡아놓고(`nvidia.com/gpu: 1`
-할당, quota 소진) 그대로 잊어버린 흔한 상황 — GPU는 "사용 중"으로 잡혀
-있지만 실제 연산은 전혀 안 돌고 있다. 인프라팀(또는 자동화)이 **실제
-사용률을 측정**해서, 진짜로 유휴 상태일 때만 회수(reclaim)한다 — 무조건
-삭제하는 게 아니라 실측 기반으로 판단한다는 게 핵심.
+**보여주는 것**: 실제 GPUaaS 플랫폼이라면 유휴 GPU를 사람이 지켜보다가
+지우는 게 아니라, **서빙 플랫폼 자체가 트래픽을 보고 자동으로 반납**한다.
+KServe로 vLLM 모델을 서빙하다가 요청이 안 오면 자동으로 replica가 0으로
+줄어서(GPU 완전 반납) 다른 팀이 쓸 수 있게 되고, 요청이 다시 오면 자동으로
+떠오른다.
 
-**시나리오 5와의 차이**: 5번은 "코드가 비효율적이라 GPU가 자주 논다"(사용은
-하고 있음, 패턴이 나쁨)는 걸 보여주고, 8번은 "아예 아무것도 안 하는데
-할당만 붙잡고 있다"(사용 자체를 안 함)는 상황을 다룬다 — 조치도 다르다:
-5번은 PriorityClass 하향(시나리오 6에서 실효성 증명), 8번은 할당 자체를
-회수해서 다른 팀이 즉시 쓸 수 있게 한다.
+**왜 Knative Serverless가 아니라 KEDA인가**: KServe의 scale-to-zero는
+원래 Knative(Serverless) 배포 모드의 기능인데, 이 클러스터의 RHOAI는
+Service Mesh 의존성을 피하려고 `remote/rhoai.sh`에서 일부러
+`RawDeployment` 모드로 설치돼 있다 (`defaultDeploymentMode: RawDeployment`,
+`serving.managementState: Removed`). RawDeployment는 원래 scale-to-zero를
+지원 안 하지만, Red Hat이 2025년 하반기에 공식 문서화한 방법이 있다 —
+**OpenShift Custom Metrics Autoscaler(KEDA 기반) 오퍼레이터**를 추가해서
+KServe의 기본 HPA를 끄고(`serving.kserve.io/autoscalerClass: external`)
+KEDA `ScaledObject`로 대체하면, Service Mesh/Knative 없이도
+`minReplicaCount: 0`까지 스케일다운된다. 이 클러스터에 이미 깔려있는
+Service Mesh 회피 결정을 안 뒤엎는 방법이라 채택함.
 
-**구성**:
-- `idle-workload`: GPU 1장 요청, 작은 연산 한 번으로 CUDA 초기화까지는
-  정상적으로 마친 뒤(=정상적으로 할당받은 것처럼 보이게) 그대로 무한
-  `sleep` — 실제 사용률은 초기화 직후 곧바로 0%대로 떨어짐
-- 회수 판단은 `nvidia-smi utilization.gpu`를 **여러 번 실측 샘플링**(기본
-  10회, 1초 간격)한 평균값으로 함 — 시나리오 3의 전력 샘플링과 같은 방식
-- 평균이 `IDLE_THRESHOLD_PCT`(기본 3%) 미만이면 **회수(pod 삭제)**,
-  아니면 회수 안 하고 "아직 유휴 아님"이라고만 보고 — 스크립트를 몇 번
-  돌려도 실제로 뭔가 계산 중이면 절대 안 지워짐
+**구성 (계획)**:
+- `openshift-custom-metrics-autoscaler-operator` 설치 (네임스페이스
+  `openshift-keda`, channel `stable`) + `KedaController` CR
+- RHOAI의 실제 vLLM `ServingRuntime`으로 `Qwen/Qwen2.5-0.5B-Instruct`
+  (5억 파라미터급 소형 공개 모델 — 로드/스케일업이 빨라 라이브 데모에 적합)
+  서빙하는 `InferenceService` 배포, `RawDeployment` 모드 유지
+- `KEDA ScaledObject`가 Thanos Querier의 vLLM 큐 메트릭
+  (`vllm:num_requests_waiting`) 또는 DCGM GPU 사용률을 트리거로 삼아
+  0 ↔ N(기본 2) 스케일
 
-**실행**:
+**실행 (구현 완료 후 갱신 예정)**:
 ```bash
 # 로컬에서
-./harness.sh scenario8-idle-reclaim-start      # idle-workload 배포
-./harness.sh scenario8-idle-reclaim-trigger    # 사용률 실측 -> 유휴 확인되면 회수
-./harness.sh scenario8-idle-reclaim-stop       # 정리 (trigger가 이미 지웠어도 안전)
-
-# 또는 bastion에서 직접
-~/scenario8-idle-reclaim-start.sh
-~/scenario8-idle-reclaim-trigger.sh
-~/scenario8-idle-reclaim-stop.sh
+./harness.sh scenario8-kserve-vllm-start      # InferenceService + KEDA ScaledObject 배포
+./harness.sh scenario8-kserve-vllm-load       # 실제 추론 요청 전송 -> 스케일업 확인
+./harness.sh scenario8-kserve-vllm-stop       # 정리
 ```
 
-**지켜볼 것**:
-- `~/scenario8-idle-reclaim-trigger.sh` 출력 — 샘플 10개, 평균, 회수 여부
-- Grafana Tier1 "GPU Utilization by Node" — 해당 노드가 계속 0%대에
-  머무는 걸 확인 가능
+**검증할 것**: replica가 실제로 0에서 시작(또는 유휴 후 0으로 감), 실제
+추론 요청을 보내면 KEDA가 스케일업해서 요청이 성공, 요청을 멈추면 idle
+윈도우 후 다시 0으로 스케일다운 — 이 세 전환을 전부 라이브로 실측 확인한
+뒤 실측 타이밍(스케일업/다운 소요 시간)을 이 섹션에 기록할 예정.
 
-**튜닝**: `SAMPLES`, `SAMPLE_INTERVAL_SEC`, `IDLE_THRESHOLD_PCT` 환경변수로
-샘플 수/간격/임계값 조정 가능 (예: `IDLE_THRESHOLD_PCT=10
-./harness.sh scenario8-idle-reclaim-trigger`).
+Sources: [How to set up KServe autoscaling for vLLM with KEDA](https://developers.redhat.com/articles/2025/09/23/how-set-kserve-autoscaling-vllm-keda),
+[Custom Metrics Autoscaler on OpenShift](https://www.redhat.com/en/blog/custom-metrics-autoscaler-on-openshift),
+[Boost AI efficiency with GPU autoscaling on OpenShift](https://developers.redhat.com/articles/2025/08/12/boost-ai-efficiency-gpu-autoscaling-openshift)
 
 ---
 
-## 시나리오 9 — 동적 할당 + 전체 자원 회수 (Dynamic Allocation + Full Reclaim)
+## 시나리오 9 — Kueue + Dynamic Resource Allocation (DRA)
 
-> **상태: harness에 반영 완료, 새 클러스터에서 실측 검증은 아직 전 (2026-08-20 작성).**
+> **상태: 설계 확정, harness 구현·실측 검증 진행 중 (2026-08-20 작성 — 이전
+> 버전은 MachineAutoscaler 기반 "동적 할당 + 회수"였는데, 그 발상 자체는
+> 시나리오 1(할당)·시나리오 8의 옛 버전(회수)로 이미 각각 다뤄지고 있어서,
+> 대신 Kueue + DRA라는 더 진짜 GPUaaS 플랫폼다운 스케줄링 계층을 보여주는
+> 쪽으로 새로 설계함).**
 
-**보여주는 것**: 시나리오 1(필요할 때 자동으로 늘어남)과 시나리오 8(안 쓰면
-실측 기반으로 회수함)을 이어붙여서, "GPU 용량이 고정 프로비저닝이 아니라
-실제 수요·실제 사용량에 따라 알아서 늘었다 줄었다 한다"는 전체 탄력성
-루프를 하나의 흐름으로 보여준다 — 인프라팀이 노드를 수동으로 관리하지
-않는다는 게 핵심 메시지.
+**보여주는 것**: 지금까지의 시나리오들은 전부 Kubernetes 기본 스케줄러 +
+`nvidia.com/gpu: N` 정수 카운팅에 의존한다 (Pending → MachineAutoscaler,
+PriorityClass → Preemption 등). 진짜 멀티테넌트 GPUaaS 플랫폼은 그 위에
+**Kueue**(작업 큐잉 — 팀별 쿼터·공정 분배·우선순위를 스케줄러 이전 단계에서
+관리)와 **DRA**(Dynamic Resource Allocation — GPU를 device-plugin의 단순
+정수 카운팅이 아니라 `ResourceClaim`이라는 구조화된 API로 요청/할당하는
+Kubernetes 최신 표준 방식, OpenShift 4.21부터 GA)를 올려서 훨씬 정교하게
+관리한다.
 
-**흐름**:
-1. `anchor-workload`가 기존 GPU 노드 1대를 이미 다 쓰고 있는 상태에서
-2. `dynamic-workload`가 같은 GPU 플레이버로 하나 더 요청 → `Pending` →
-   `MachineAutoscaler`가 노드를 **동적으로 할당**(1→2, 시나리오 1과 동일
-   메커니즘)
-3. 새 노드에 스케줄된 `dynamic-workload`는 CUDA 초기화만 하고 바로 유휴
-   상태로 감 (시나리오 8의 `idle-workload`와 동일 패턴 — 할당은 받았지만
-   실제로는 안 씀)
-4. `scenario9-dynamic-reclaim-trigger.sh`가 **실제 사용률을 측정**해서
-   유휴가 확인되면 `dynamic-workload`를 회수(pod 삭제)
-5. 그 노드엔 이제 아무 워크로드도 안 남아서, `ClusterAutoscaler`가
-   `unneededTime`(기본 10분) 후 **노드 자체도 자동으로 줄인다** — 데모
-   속도를 위해 즉시 강제 축소하는 명령도 같이 출력해줌
+**주의 — MIG(GPU 슬라이싱)는 이 시나리오에 안 들어감**: DRA가 유명한 이유
+중 하나가 NVIDIA MIG(GPU 하나를 여러 개로 쪼개 쓰는 것)와의 조합인데,
+이 클러스터의 GPU 플레이버(A10G, L4)는 **하드웨어 자체가 MIG를 지원하지
+않는다**(MIG는 A100/H100급 데이터센터 GPU 전용 회로가 있어야 함 — 실측
+확인 완료, 2026-08-20). 그래서 이 시나리오는 "GPU를 쪼개 쓰기"가 아니라,
+**온전한 GPU 한 장 단위 요청도 Kueue의 큐/쿼터를 거쳐서, DRA의 구조화된
+클레임 API로 할당된다**는 부분에 집중한다.
 
-**구성**:
-- `anchor-workload`: g5.2xlarge 기존 노드를 점유하는 상시 작업 (계속 실행)
-- `dynamic-workload`: 같은 플레이버로 GPU 1장 더 요청 → 동적 할당 트리거 →
-  뜨자마자 유휴 상태
+**흐름 (계획)**:
+1. Kueue(Red Hat build of Kueue) 설치 — 팀별 `LocalQueue` + GPU 쿼터를 가진
+   `ClusterQueue` 구성 (리소스 플레이버는 DRA `DeviceClass`를 참조)
+2. 두 팀이 동시에 GPU를 요청하는 Job을 여러 개 제출 — 합쳐서 쿼터 초과
+3. 쿼터를 넘는 Job들은 스케줄러한테 넘어가기도 전에 **Kueue admission
+   단계에서 대기열에 그대로 머무름** (Pending으로 스케줄러가 붙잡는 게
+   아니라, Kueue가 애초에 스케줄러에 넘기지 않음) — `kubectl get workloads`로
+   Admitted vs 대기 중인 워크로드를 구분해서 보여줌
+4. 앞선 Job이 끝나서 쿼터가 비면 대기 중이던 Job이 **공정 분배/우선순위
+   규칙에 따라** 자동으로 admit됨
+5. 실제 GPU 할당은 `ResourceClaim`/`ResourceSlice`(DRA 오브젝트)로 이뤄짐 —
+   `nvidia.com/gpu: 1` 같은 구식 정수 요청이 아니라 구조화된 클레임인 걸
+   직접 확인
 
-**실행**:
-```bash
-# 로컬에서
-./harness.sh scenario9-dynamic-reclaim-start      # anchor + dynamic 배포, 동적 할당 대기
-./harness.sh scenario9-dynamic-reclaim-trigger    # 사용률 실측 -> 유휴 확인되면 회수 + 노드 축소 안내
-./harness.sh scenario9-dynamic-reclaim-stop       # 정리 + MachineSet 1로 강제 원복
+**harness 구현은 아직**: Kueue/DRA의 정확한 CRD 필드·API 버전을 이
+클러스터의 실제 설치본 기준으로 확인한 뒤 스크립트를 작성할 예정 —
+추측으로 YAML을 먼저 쓰지 않고, 이번 세션에서 계속 해온 대로 실제
+클러스터에서 검증하며 만든다.
 
-# 또는 bastion에서 직접
-~/scenario9-dynamic-reclaim-start.sh
-~/scenario9-dynamic-reclaim-trigger.sh
-~/scenario9-dynamic-reclaim-stop.sh
-```
-
-**지켜볼 것**:
-- `oc get pods -n gpu-dynamic-scenario-9 -o wide -w` — `dynamic-workload`가
-  `Pending`이었다가 새 노드에 스케줄되는 과정
-- `oc get machineset -n openshift-machine-api | grep g5-2xlarge` — 1→2로
-  늘었다가, 회수 후 시간이 지나면(또는 수동 명령으로 즉시) 다시 1로
-  줄어드는 것
-
-**타이밍**: 동적 할당까지는 시나리오 1과 동일(~10분). 회수는 즉시(실측
-샘플링 시간만), 노드 자체가 줄어드는 건 `ClusterAutoscaler` 기본값 기준
-10분 더 걸림 — trigger 스크립트가 즉시 축소용 `oc scale` 명령도 같이
-출력해주니 데모에서는 그걸 쓰는 걸 추천.
+Sources: [Improve GPU utilization with Kueue in OpenShift AI](https://developers.redhat.com/articles/2025/05/22/improve-gpu-utilization-kueue-openshift-ai),
+[Dynamic resource allocation goes GA in Red Hat OpenShift 4.21](https://developers.redhat.com/articles/2026/03/25/dynamic-resource-allocation-goes-ga-red-hat-openshift-421-smarter-gpu),
+[Multitenant AI inference with dynamic resource allocation on OpenShift](https://developers.redhat.com/articles/2026/08/03/multitenant-ai-inference-dynamic-resource-allocation-openshift)
 
 ---
 
