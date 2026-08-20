@@ -24,6 +24,7 @@
 #   dcgm-alerts                              standalone Prometheus+Alertmanager for GPU temp/XID alerts -> Slack
 #   dashboards                                  apply Tier1 (infra) / Tier2 (tenant) Grafana dashboards
 #   monitoring-all                                enable-monitoring + grafana + dcgm-alerts + dashboards
+#   openshift-logging                               MinIO + Loki Operator + LokiStack + ClusterLogForwarder (logs survive pod deletion)
 #   scenario1-autoscale-demo                        2 training-job pods pinned to one GPU flavor -> MachineSet scale-out
 #   scenario1-autoscale-demo-stop                     delete the training-job demo pods
 #   scenario2-alert-demo                                gpu-burn pod in a demo namespace to exercise the overheat alert
@@ -49,7 +50,7 @@
 #   scenario9-dynamic-reclaim-trigger                                                                samples dynamic pod's utilization -> reclaims if idle
 #   scenario9-dynamic-reclaim-stop                                                                    delete both pods, reset MachineSet to 1 replica
 #   push-scenario-scripts                     copy scenario1-4 convenience scripts to ~/ on the bastion
-#   all                                    full sequence: cluster+admin-user+g5/g6 GPU+RHOAI+monitoring, end to end
+#   all                                    full sequence: cluster+admin-user+g5/g6 GPU+RHOAI+monitoring+logging, end to end
 #   destroy-cluster                          openshift-install destroy cluster
 #   destroy-bastion --yes                      tear down bastion + its network (destructive)
 #
@@ -296,6 +297,8 @@ cmd_monitoring_all() {
   cmd_dashboards
 }
 
+cmd_openshift_logging() { ssh_bastion 'bash -s' < ./remote/openshift-logging.sh; }
+
 cmd_scenario1_autoscale_demo() {
   ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-autoscale-scenario-1}' INSTANCE_TYPE='${INSTANCE_TYPE:-g5.2xlarge}' \
     bash -s" < ./remote/scenario1-autoscale-demo.sh
@@ -513,6 +516,7 @@ cmd_all() {
   cmd_gpu_operator
   cmd_rhoai
   cmd_monitoring_all
+  cmd_openshift_logging
 }
 
 case "$cmd" in
@@ -537,6 +541,7 @@ case "$cmd" in
   dcgm-alerts)                              cmd_dcgm_alerts ;;
   dashboards)                                 cmd_dashboards ;;
   monitoring-all)                               cmd_monitoring_all ;;
+  openshift-logging)                              cmd_openshift_logging ;;
   scenario1-autoscale-demo)                       cmd_scenario1_autoscale_demo ;;
   scenario1-autoscale-demo-stop)                    cmd_scenario1_autoscale_demo_stop ;;
   scenario2-alert-demo)                               cmd_scenario2_alert_demo ;;
