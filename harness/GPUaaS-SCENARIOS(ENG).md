@@ -519,6 +519,63 @@ standing one up is a separate MachineSet exercise out of scope here.
 
 ---
 
+## Scenario 8 — Idle GPU Reclaim
+
+> **Status: wired into the harness; not yet measurement-validated on a fresh cluster (written 2026-08-20).**
+
+**What it shows**: the common case of a team member checking out an
+interactive/dev GPU session (`nvidia.com/gpu: 1` allocated, counted against
+quota) and forgetting about it — the GPU shows as "in use" but nothing is
+actually running on it. The infra team (or an automated controller)
+**measures actual utilization** and only reclaims it once it's genuinely
+idle — the key point being this is a real measurement-based decision, not an
+unconditional delete.
+
+**How this differs from Scenario 5**: Scenario 5 shows "the code is
+inefficient so the GPU idles often" (it IS being used, just in a bad
+pattern); Scenario 8 covers "nothing is running at all, but the allocation is
+still held" (no usage whatsoever) — and the response differs too: Scenario 5
+downgrades the PriorityClass (proven to have teeth in Scenario 6), Scenario 8
+reclaims the allocation itself so another team can use it immediately.
+
+**Setup**:
+- `idle-workload`: requests 1 GPU, runs one small op to properly finish CUDA
+  initialization (so it looks like a legitimately-allocated session), then
+  sleeps forever — actual utilization drops to near-0% right after that
+  initial op
+- The reclaim decision is based on **multiple real samples** of `nvidia-smi
+  utilization.gpu` (default 10 samples, 1s apart) — the same technique as
+  Scenario 3's power sampling
+- Only **reclaims (deletes the pod)** if the average is below
+  `IDLE_THRESHOLD_PCT` (default 3%); otherwise it just reports "not idle
+  yet" and does nothing — re-running it while something is genuinely
+  computing will never delete it
+
+**Run**:
+```bash
+# locally
+./harness.sh scenario8-idle-reclaim-start      # deploy idle-workload
+./harness.sh scenario8-idle-reclaim-trigger    # sample utilization -> reclaim if confirmed idle
+./harness.sh scenario8-idle-reclaim-stop       # cleanup (safe even if trigger already deleted it)
+
+# or directly on the bastion
+~/scenario8-idle-reclaim-start.sh
+~/scenario8-idle-reclaim-trigger.sh
+~/scenario8-idle-reclaim-stop.sh
+```
+
+**Watch**:
+- `~/scenario8-idle-reclaim-trigger.sh` output — the 10 samples, the
+  average, and whether it reclaimed
+- Grafana Tier1 "GPU Utilization by Node" — confirms that node sits near 0%
+  the whole time
+
+**Tuning**: adjust sample count/interval/threshold via `SAMPLES`,
+`SAMPLE_INTERVAL_SEC`, `IDLE_THRESHOLD_PCT` (e.g. `IDLE_THRESHOLD_PCT=10
+./harness.sh scenario8-idle-reclaim-trigger`).
+
+---
+
 ## Unimplemented Scenarios (for reference, numbered per the original `openshift-monitoring` doc)
 
 The following are not yet automated in the harness. Detection conditions and

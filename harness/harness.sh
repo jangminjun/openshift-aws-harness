@@ -42,6 +42,9 @@
 #   scenario7-chargeback-start                                                    team-workload-1 (1 GPU) + ResourceQuota capping the namespace at it
 #   scenario7-chargeback-trigger                                                    attempt a second GPU pod -> rejected at admission time
 #   scenario7-chargeback-stop                                                         delete pods + ResourceQuota
+#   scenario8-idle-reclaim-start                                                          idle-workload holds a GPU, does nothing
+#   scenario8-idle-reclaim-trigger                                                          samples utilization -> reclaims only if actually idle
+#   scenario8-idle-reclaim-stop                                                                delete idle-workload if still present
 #   push-scenario-scripts                     copy scenario1-4 convenience scripts to ~/ on the bastion
 #   all                                    full sequence: cluster+admin-user+g5/g6 GPU+RHOAI+monitoring, end to end
 #   destroy-cluster                          openshift-install destroy cluster
@@ -392,6 +395,21 @@ cmd_scenario7_chargeback_stop() {
     < ./remote/scenario7-chargeback-stop.sh
 }
 
+cmd_scenario8_idle_reclaim_start() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-idle-scenario-8}' bash -s" \
+    < ./remote/scenario8-idle-reclaim-start.sh
+}
+
+cmd_scenario8_idle_reclaim_trigger() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-idle-scenario-8}' IDLE_THRESHOLD_PCT='${IDLE_THRESHOLD_PCT:-3}' bash -s" \
+    < ./remote/scenario8-idle-reclaim-trigger.sh
+}
+
+cmd_scenario8_idle_reclaim_stop() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-idle-scenario-8}' bash -s" \
+    < ./remote/scenario8-idle-reclaim-stop.sh
+}
+
 # Copies standalone convenience copies of the scenario scripts onto the
 # bastion under the exact names the SCENARIOS docs reference (e.g.
 # ~/scenario1-autoscale-start.sh), so a demo can run them directly over SSH
@@ -418,6 +436,9 @@ cmd_push_scenario_scripts() {
     "scenario7-chargeback-start.sh:scenario7-chargeback-start.sh"
     "scenario7-chargeback-trigger.sh:scenario7-chargeback-trigger.sh"
     "scenario7-chargeback-stop.sh:scenario7-chargeback-stop.sh"
+    "scenario8-idle-reclaim-start.sh:scenario8-idle-reclaim-start.sh"
+    "scenario8-idle-reclaim-trigger.sh:scenario8-idle-reclaim-trigger.sh"
+    "scenario8-idle-reclaim-stop.sh:scenario8-idle-reclaim-stop.sh"
   )
   local pair src dst
   for pair in "${pairs[@]}"; do
@@ -513,6 +534,9 @@ case "$cmd" in
   scenario7-chargeback-start)                                                   cmd_scenario7_chargeback_start ;;
   scenario7-chargeback-trigger)                                                   cmd_scenario7_chargeback_trigger ;;
   scenario7-chargeback-stop)                                                        cmd_scenario7_chargeback_stop ;;
+  scenario8-idle-reclaim-start)                                                         cmd_scenario8_idle_reclaim_start ;;
+  scenario8-idle-reclaim-trigger)                                                         cmd_scenario8_idle_reclaim_trigger ;;
+  scenario8-idle-reclaim-stop)                                                              cmd_scenario8_idle_reclaim_stop ;;
   push-scenario-scripts)               cmd_push_scenario_scripts ;;
   destroy-cluster)                     cmd_destroy_cluster ;;
   destroy-bastion)                      cmd_destroy_bastion "$@" ;;

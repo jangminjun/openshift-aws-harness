@@ -483,6 +483,56 @@ pod 자체가 생성조차 안 됨(`oc get pods`에 안 뜸) — 스케줄러가
 
 ---
 
+## 시나리오 8 — 유휴 GPU 회수 (Idle Reclaim)
+
+> **상태: harness에 반영 완료, 새 클러스터에서 실측 검증은 아직 전 (2026-08-20 작성).**
+
+**보여주는 것**: 팀원이 인터랙티브/개발용 GPU 세션을 잡아놓고(`nvidia.com/gpu: 1`
+할당, quota 소진) 그대로 잊어버린 흔한 상황 — GPU는 "사용 중"으로 잡혀
+있지만 실제 연산은 전혀 안 돌고 있다. 인프라팀(또는 자동화)이 **실제
+사용률을 측정**해서, 진짜로 유휴 상태일 때만 회수(reclaim)한다 — 무조건
+삭제하는 게 아니라 실측 기반으로 판단한다는 게 핵심.
+
+**시나리오 5와의 차이**: 5번은 "코드가 비효율적이라 GPU가 자주 논다"(사용은
+하고 있음, 패턴이 나쁨)는 걸 보여주고, 8번은 "아예 아무것도 안 하는데
+할당만 붙잡고 있다"(사용 자체를 안 함)는 상황을 다룬다 — 조치도 다르다:
+5번은 PriorityClass 하향(시나리오 6에서 실효성 증명), 8번은 할당 자체를
+회수해서 다른 팀이 즉시 쓸 수 있게 한다.
+
+**구성**:
+- `idle-workload`: GPU 1장 요청, 작은 연산 한 번으로 CUDA 초기화까지는
+  정상적으로 마친 뒤(=정상적으로 할당받은 것처럼 보이게) 그대로 무한
+  `sleep` — 실제 사용률은 초기화 직후 곧바로 0%대로 떨어짐
+- 회수 판단은 `nvidia-smi utilization.gpu`를 **여러 번 실측 샘플링**(기본
+  10회, 1초 간격)한 평균값으로 함 — 시나리오 3의 전력 샘플링과 같은 방식
+- 평균이 `IDLE_THRESHOLD_PCT`(기본 3%) 미만이면 **회수(pod 삭제)**,
+  아니면 회수 안 하고 "아직 유휴 아님"이라고만 보고 — 스크립트를 몇 번
+  돌려도 실제로 뭔가 계산 중이면 절대 안 지워짐
+
+**실행**:
+```bash
+# 로컬에서
+./harness.sh scenario8-idle-reclaim-start      # idle-workload 배포
+./harness.sh scenario8-idle-reclaim-trigger    # 사용률 실측 -> 유휴 확인되면 회수
+./harness.sh scenario8-idle-reclaim-stop       # 정리 (trigger가 이미 지웠어도 안전)
+
+# 또는 bastion에서 직접
+~/scenario8-idle-reclaim-start.sh
+~/scenario8-idle-reclaim-trigger.sh
+~/scenario8-idle-reclaim-stop.sh
+```
+
+**지켜볼 것**:
+- `~/scenario8-idle-reclaim-trigger.sh` 출력 — 샘플 10개, 평균, 회수 여부
+- Grafana Tier1 "GPU Utilization by Node" — 해당 노드가 계속 0%대에
+  머무는 걸 확인 가능
+
+**튜닝**: `SAMPLES`, `SAMPLE_INTERVAL_SEC`, `IDLE_THRESHOLD_PCT` 환경변수로
+샘플 수/간격/임계값 조정 가능 (예: `IDLE_THRESHOLD_PCT=10
+./harness.sh scenario8-idle-reclaim-trigger`).
+
+---
+
 ## 미구현 시나리오 (참고용, `openshift-monitoring` 문서 원본 번호 기준)
 
 아래는 아직 harness에 자동화되어 있지 않은 시나리오들입니다. 감지 조건과
