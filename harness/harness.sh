@@ -45,6 +45,9 @@
 #   scenario8-idle-reclaim-start                                                          idle-workload holds a GPU, does nothing
 #   scenario8-idle-reclaim-trigger                                                          samples utilization -> reclaims only if actually idle
 #   scenario8-idle-reclaim-stop                                                                delete idle-workload if still present
+#   scenario9-dynamic-reclaim-start                                                                anchor pod + dynamic pod -> MachineAutoscaler scale-out
+#   scenario9-dynamic-reclaim-trigger                                                                samples dynamic pod's utilization -> reclaims if idle
+#   scenario9-dynamic-reclaim-stop                                                                    delete both pods, reset MachineSet to 1 replica
 #   push-scenario-scripts                     copy scenario1-4 convenience scripts to ~/ on the bastion
 #   all                                    full sequence: cluster+admin-user+g5/g6 GPU+RHOAI+monitoring, end to end
 #   destroy-cluster                          openshift-install destroy cluster
@@ -410,6 +413,21 @@ cmd_scenario8_idle_reclaim_stop() {
     < ./remote/scenario8-idle-reclaim-stop.sh
 }
 
+cmd_scenario9_dynamic_reclaim_start() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-dynamic-scenario-9}' INSTANCE_TYPE='${INSTANCE_TYPE:-g5.2xlarge}' bash -s" \
+    < ./remote/scenario9-dynamic-reclaim-start.sh
+}
+
+cmd_scenario9_dynamic_reclaim_trigger() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-dynamic-scenario-9}' INSTANCE_TYPE='${INSTANCE_TYPE:-g5.2xlarge}' IDLE_THRESHOLD_PCT='${IDLE_THRESHOLD_PCT:-3}' bash -s" \
+    < ./remote/scenario9-dynamic-reclaim-trigger.sh
+}
+
+cmd_scenario9_dynamic_reclaim_stop() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-dynamic-scenario-9}' INSTANCE_TYPE='${INSTANCE_TYPE:-g5.2xlarge}' bash -s" \
+    < ./remote/scenario9-dynamic-reclaim-stop.sh
+}
+
 # Copies standalone convenience copies of the scenario scripts onto the
 # bastion under the exact names the SCENARIOS docs reference (e.g.
 # ~/scenario1-autoscale-start.sh), so a demo can run them directly over SSH
@@ -439,6 +457,9 @@ cmd_push_scenario_scripts() {
     "scenario8-idle-reclaim-start.sh:scenario8-idle-reclaim-start.sh"
     "scenario8-idle-reclaim-trigger.sh:scenario8-idle-reclaim-trigger.sh"
     "scenario8-idle-reclaim-stop.sh:scenario8-idle-reclaim-stop.sh"
+    "scenario9-dynamic-reclaim-start.sh:scenario9-dynamic-reclaim-start.sh"
+    "scenario9-dynamic-reclaim-trigger.sh:scenario9-dynamic-reclaim-trigger.sh"
+    "scenario9-dynamic-reclaim-stop.sh:scenario9-dynamic-reclaim-stop.sh"
   )
   local pair src dst
   for pair in "${pairs[@]}"; do
@@ -537,6 +558,9 @@ case "$cmd" in
   scenario8-idle-reclaim-start)                                                         cmd_scenario8_idle_reclaim_start ;;
   scenario8-idle-reclaim-trigger)                                                         cmd_scenario8_idle_reclaim_trigger ;;
   scenario8-idle-reclaim-stop)                                                              cmd_scenario8_idle_reclaim_stop ;;
+  scenario9-dynamic-reclaim-start)                                                              cmd_scenario9_dynamic_reclaim_start ;;
+  scenario9-dynamic-reclaim-trigger)                                                              cmd_scenario9_dynamic_reclaim_trigger ;;
+  scenario9-dynamic-reclaim-stop)                                                                 cmd_scenario9_dynamic_reclaim_stop ;;
   push-scenario-scripts)               cmd_push_scenario_scripts ;;
   destroy-cluster)                     cmd_destroy_cluster ;;
   destroy-bastion)                      cmd_destroy_bastion "$@" ;;

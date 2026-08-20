@@ -576,6 +576,67 @@ reclaims the allocation itself so another team can use it immediately.
 
 ---
 
+## Scenario 9 — Dynamic Allocation + Full Reclaim
+
+> **Status: wired into the harness; not yet measurement-validated on a fresh cluster (written 2026-08-20).**
+
+**What it shows**: chains Scenario 1 (capacity grows automatically on
+demand) and Scenario 8 (capacity is reclaimed automatically, based on real
+measurement, once unused) into one continuous loop — GPU capacity in this
+platform isn't statically provisioned, it expands and contracts on its own
+based on actual demand and actual usage. The core message: the infra team
+never manually manages nodes.
+
+**Flow**:
+1. `anchor-workload` is already fully occupying the GPU flavor's one
+   existing node.
+2. `dynamic-workload` requests one more GPU on the same flavor → `Pending`
+   → the `MachineAutoscaler` **dynamically allocates** a node (1→2, the
+   same mechanism as Scenario 1).
+3. Once scheduled on the new node, `dynamic-workload` only finishes CUDA
+   init and immediately goes idle (same pattern as Scenario 8's
+   `idle-workload` — it got the allocation but never actually uses it).
+4. `scenario9-dynamic-reclaim-trigger.sh` **measures real utilization**,
+   and once confirmed idle, reclaims (deletes) `dynamic-workload`.
+5. With nothing left running on that node, the `ClusterAutoscaler` scales
+   it back down automatically after its `unneededTime` (default 10min) —
+   the trigger script also prints a command to force that immediately, for
+   demo speed.
+
+**Setup**:
+- `anchor-workload`: a permanent job occupying the existing g5.2xlarge node
+  (keeps running the whole time)
+- `dynamic-workload`: requests one more GPU on the same flavor — triggers
+  dynamic allocation, then goes idle right after landing
+
+**Run**:
+```bash
+# locally
+./harness.sh scenario9-dynamic-reclaim-start      # deploy anchor + dynamic, wait for dynamic allocation
+./harness.sh scenario9-dynamic-reclaim-trigger    # sample utilization -> reclaim + report node scale-down if idle
+./harness.sh scenario9-dynamic-reclaim-stop       # cleanup + force MachineSet back to 1 replica
+
+# or directly on the bastion
+~/scenario9-dynamic-reclaim-start.sh
+~/scenario9-dynamic-reclaim-trigger.sh
+~/scenario9-dynamic-reclaim-stop.sh
+```
+
+**Watch**:
+- `oc get pods -n gpu-dynamic-scenario-9 -o wide -w` — `dynamic-workload`
+  going from `Pending` to scheduled on the new node
+- `oc get machineset -n openshift-machine-api | grep g5-2xlarge` — 1→2 on
+  allocation, then back to 1 after reclaim (either after the wait, or
+  immediately via the printed manual command)
+
+**Timing**: dynamic allocation takes the same ~10min as Scenario 1. Reclaim
+itself is immediate (just the sampling time); the node scaling back down
+takes another ~10min under `ClusterAutoscaler`'s default — the trigger
+script prints an `oc scale` shortcut to force it immediately, which is what
+you'll want to use live in a demo.
+
+---
+
 ## Unimplemented Scenarios (for reference, numbered per the original `openshift-monitoring` doc)
 
 The following are not yet automated in the harness. Detection conditions and

@@ -533,6 +533,62 @@ pod 자체가 생성조차 안 됨(`oc get pods`에 안 뜸) — 스케줄러가
 
 ---
 
+## 시나리오 9 — 동적 할당 + 전체 자원 회수 (Dynamic Allocation + Full Reclaim)
+
+> **상태: harness에 반영 완료, 새 클러스터에서 실측 검증은 아직 전 (2026-08-20 작성).**
+
+**보여주는 것**: 시나리오 1(필요할 때 자동으로 늘어남)과 시나리오 8(안 쓰면
+실측 기반으로 회수함)을 이어붙여서, "GPU 용량이 고정 프로비저닝이 아니라
+실제 수요·실제 사용량에 따라 알아서 늘었다 줄었다 한다"는 전체 탄력성
+루프를 하나의 흐름으로 보여준다 — 인프라팀이 노드를 수동으로 관리하지
+않는다는 게 핵심 메시지.
+
+**흐름**:
+1. `anchor-workload`가 기존 GPU 노드 1대를 이미 다 쓰고 있는 상태에서
+2. `dynamic-workload`가 같은 GPU 플레이버로 하나 더 요청 → `Pending` →
+   `MachineAutoscaler`가 노드를 **동적으로 할당**(1→2, 시나리오 1과 동일
+   메커니즘)
+3. 새 노드에 스케줄된 `dynamic-workload`는 CUDA 초기화만 하고 바로 유휴
+   상태로 감 (시나리오 8의 `idle-workload`와 동일 패턴 — 할당은 받았지만
+   실제로는 안 씀)
+4. `scenario9-dynamic-reclaim-trigger.sh`가 **실제 사용률을 측정**해서
+   유휴가 확인되면 `dynamic-workload`를 회수(pod 삭제)
+5. 그 노드엔 이제 아무 워크로드도 안 남아서, `ClusterAutoscaler`가
+   `unneededTime`(기본 10분) 후 **노드 자체도 자동으로 줄인다** — 데모
+   속도를 위해 즉시 강제 축소하는 명령도 같이 출력해줌
+
+**구성**:
+- `anchor-workload`: g5.2xlarge 기존 노드를 점유하는 상시 작업 (계속 실행)
+- `dynamic-workload`: 같은 플레이버로 GPU 1장 더 요청 → 동적 할당 트리거 →
+  뜨자마자 유휴 상태
+
+**실행**:
+```bash
+# 로컬에서
+./harness.sh scenario9-dynamic-reclaim-start      # anchor + dynamic 배포, 동적 할당 대기
+./harness.sh scenario9-dynamic-reclaim-trigger    # 사용률 실측 -> 유휴 확인되면 회수 + 노드 축소 안내
+./harness.sh scenario9-dynamic-reclaim-stop       # 정리 + MachineSet 1로 강제 원복
+
+# 또는 bastion에서 직접
+~/scenario9-dynamic-reclaim-start.sh
+~/scenario9-dynamic-reclaim-trigger.sh
+~/scenario9-dynamic-reclaim-stop.sh
+```
+
+**지켜볼 것**:
+- `oc get pods -n gpu-dynamic-scenario-9 -o wide -w` — `dynamic-workload`가
+  `Pending`이었다가 새 노드에 스케줄되는 과정
+- `oc get machineset -n openshift-machine-api | grep g5-2xlarge` — 1→2로
+  늘었다가, 회수 후 시간이 지나면(또는 수동 명령으로 즉시) 다시 1로
+  줄어드는 것
+
+**타이밍**: 동적 할당까지는 시나리오 1과 동일(~10분). 회수는 즉시(실측
+샘플링 시간만), 노드 자체가 줄어드는 건 `ClusterAutoscaler` 기본값 기준
+10분 더 걸림 — trigger 스크립트가 즉시 축소용 `oc scale` 명령도 같이
+출력해주니 데모에서는 그걸 쓰는 걸 추천.
+
+---
+
 ## 미구현 시나리오 (참고용, `openshift-monitoring` 문서 원본 번호 기준)
 
 아래는 아직 harness에 자동화되어 있지 않은 시나리오들입니다. 감지 조건과
