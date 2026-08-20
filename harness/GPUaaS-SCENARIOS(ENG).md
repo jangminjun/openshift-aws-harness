@@ -682,9 +682,32 @@ alive, rather than pretending it isn't a tradeoff.
    tokens/sec) resume normally and are already wired into the existing
    Thanos/Grafana stack.
 
+**Logging — pods keep changing, so how do logs survive?**: the metrics
+above (1-4) live outside the pod (Prometheus/Thanos), so they survive
+restarts for free -- but **the pod's own logs are gone the moment the pod is
+deleted.** Showing that logs actually persist requires installing
+**OpenShift Logging (Loki-based)** so logs get shipped out before the pod
+dies:
+- **Object storage is required**: the current (Loki-based) OpenShift
+  Logging's `LokiStack` cannot run on a PVC alone -- it needs an S3-compatible
+  object store. This lab has no real S3, so **MinIO runs in-cluster** to
+  fill that role (the officially documented Red Hat approach for test/demo
+  environments without real cloud object storage).
+- **Setup (planned)**: MinIO (Deployment + PVC + Service, create a bucket)
+  → install the Loki Operator + Red Hat OpenShift Logging Operator → a
+  `LokiStack` CR pointing at MinIO's S3 endpoint/bucket/credentials (via a
+  Secret) → a `ClusterLogForwarder` shipping application logs (especially
+  from `gpu-kserve-scenario-8`) to the LokiStack.
+- **How to validate**: `qwen-vllm-predictor` logs a request → KEDA scales
+  to 0, deleting that pod → `oc logs` no longer shows anything, but **Loki
+  (via the OpenShift console's Observe → Logs, or a Loki datasource added to
+  the existing Grafana) still returns it, queried by the
+  `app=isvc.qwen-vllm-predictor` label** -- this is the scenario's core
+  proof point.
+
 **Harness implementation not written yet** — needs Scenario 8's actual
-InferenceService/ScaledObject running first to build real dashboard panels
-and alerts against, verified live rather than guessed.
+InferenceService/ScaledObject running first to build real dashboard panels,
+alerts, and the logging pipeline against, verified live rather than guessed.
 
 ---
 

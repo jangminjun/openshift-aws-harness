@@ -628,9 +628,30 @@ Mesh 의존성을 피하려고 일부러 고른 **KEDA 기반 방식은 그런 �
    초당 토큰 수)이 정상적으로 다시 나오고, 이미 구축된 Thanos/Grafana
    스택에 그대로 연결된다
 
+**로깅 — pod가 계속 바뀌는데 로그는 어떻게 유지하는가**: 메트릭(위 1~4)은
+Prometheus/Thanos가 외부에 저장하니 pod 재시작과 무관하게 살아남지만,
+**pod 로그 자체는 pod가 삭제되면 그냥 사라진다.** 이걸 실제로 보여주려면
+**OpenShift Logging(Loki 기반)**을 설치해서 pod가 죽기 전에 로그를
+중앙으로 실어날라야 한다:
+- **오브젝트 스토리지 필수**: 현재(Loki 기반) OpenShift Logging의
+  `LokiStack`은 PVC만으로는 안 되고 S3 호환 오브젝트 스토리지가 반드시
+  있어야 한다. 이 랩 환경엔 실제 S3가 없으므로 **클러스터 안에 MinIO를
+  직접 띄워서 그 역할을 대신**한다 (Red Hat이 실제 클라우드 오브젝트
+  스토리지가 없는 테스트/데모 환경에서 공식적으로 권장하는 방식).
+- **구성 (계획)**: MinIO(Deployment + PVC + Service, 버킷 생성) →
+  Loki Operator + Red Hat OpenShift Logging Operator 설치 → MinIO를
+  가리키는 `LokiStack` CR (S3 엔드포인트/버킷/자격증명을 Secret으로) →
+  `ClusterLogForwarder`로 애플리케이션 로그(특히 `gpu-kserve-scenario-8`
+  네임스페이스)를 LokiStack으로 전달
+- **검증 방법**: `qwen-vllm-predictor` pod가 요청을 처리하는 로그를 찍고
+  → KEDA가 0으로 스케일다운해서 그 pod가 삭제됨 → `oc logs`로는 더 이상
+  안 보이지만, **Loki 쪽(OpenShift 콘솔의 Observe → Logs, 또는 기존
+  Grafana에 Loki 데이터소스 추가해서 조회)에서는 `app=isvc.qwen-vllm-predictor`
+  라벨로 여전히 조회된다** — 이게 이 시나리오의 핵심 증명 포인트
+
 **harness 구현은 아직**: 시나리오 8의 실제 InferenceService/ScaledObject가
-떠 있어야 진짜 대시보드 패널/알람을 실제로 만들고 검증할 수 있어서,
-추측 없이 실제 환경에서 만들 예정.
+떠 있어야 진짜 대시보드 패널/알람/로깅 파이프라인을 실제로 만들고 검증할
+수 있어서, 추측 없이 실제 환경에서 만들 예정.
 
 ---
 
