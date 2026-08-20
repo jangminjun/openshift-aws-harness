@@ -596,6 +596,44 @@ Sources: [Improve GPU utilization with Kueue in OpenShift AI](https://developers
 
 ---
 
+## 시나리오 10 — Scale-to-Zero 상태의 모니터링
+
+> **상태: 설계 확정, 시나리오 8이 실제로 떠 있어야 구현 가능 (2026-08-20).**
+
+**보여주는 것**: 0으로 스케일다운되면 "pod가 없는데 뭘 모니터링하지?"라는
+질문이 자연스럽게 나온다. 그리고 시나리오 8을 만들면서 실제로 발견한 진짜
+문제가 있다 — Knative Serverless 모드는 요청 경로에 Activator가 끼어있어서
+콜드스타트 중에 들어온 요청을 붙잡아뒀다가 pod가 뜨면 넘겨주는데, Service
+Mesh 의존성을 피하려고 일부러 고른 **KEDA 기반 방식은 그런 버퍼링이
+없다** — replica가 0일 때 요청이 오면 받아줄 pod가 아예 없어서 그냥
+실패한다. 이 시나리오는 이 트레이드오프를 숨기지 않고, pod 생존 여부와
+무관한 신호들로 어떻게 정직하게 관측하는지를 보여준다.
+
+**모니터링 레이어 (계획)**:
+1. **시간에 따른 replica 수** — `kube_deployment_status_replicas{deployment="qwen-vllm-predictor"}`
+   (kube-state-metrics 제공, OpenShift 자체 모니터링이 이미 수집 중)를
+   Grafana 패널로 추가 — 이건 API 서버를 통해 Deployment 오브젝트의
+   status에서 나오는 값이라 pod 존재 여부와 무관하게 항상 조회 가능하고,
+   0↔1 전환이 타임라인에 그대로 보인다
+2. **KEDA 자체 트리거 메트릭** — `keda-metrics-apiserver`가 ScaledObject의
+   현재 트리거 값(예: 큐 깊이)을 replica=0 상태에서도 노출한다 — 즉
+   스케일업이 실제로 일어나기 *전에* "왜 곧 스케일업될지"를 먼저 볼 수 있다
+3. **콜드스타트 갭을 정직하게 보여주기** — replica=0인 상태에서 실제 요청을
+   보내서 진짜 어떻게 되는지(연결 거부/5xx, 우아하게 큐잉되는 게 아님)
+   확인하고 데모에 그대로 포함시킨다. 표준 완화책(클라이언트 쪽
+   retry-with-backoff)도 같이 설명 — 서버 쪽에서 이걸 고치려면 결국
+   Knative Activator(그리고 Service Mesh)를 다시 들여와야 하는데, 그건
+   이 설계 전체가 피하려고 한 바로 그 의존성이다
+4. 일단 스케일업되고 나면 vLLM 자체 Prometheus 메트릭(큐 깊이, 레이턴시,
+   초당 토큰 수)이 정상적으로 다시 나오고, 이미 구축된 Thanos/Grafana
+   스택에 그대로 연결된다
+
+**harness 구현은 아직**: 시나리오 8의 실제 InferenceService/ScaledObject가
+떠 있어야 진짜 대시보드 패널/알람을 실제로 만들고 검증할 수 있어서,
+추측 없이 실제 환경에서 만들 예정.
+
+---
+
 ## 미구현 시나리오 (참고용, `openshift-monitoring` 문서 원본 번호 기준)
 
 아래는 아직 harness에 자동화되어 있지 않은 시나리오들입니다. 감지 조건과

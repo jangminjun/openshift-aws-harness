@@ -646,6 +646,48 @@ Sources: [Improve GPU utilization with Kueue in OpenShift AI](https://developers
 
 ---
 
+## Scenario 10 — Monitoring a Scale-to-Zero Service
+
+> **Status: design confirmed, depends on Scenario 8 being live first (2026-08-20).**
+
+**What it shows**: scaling to zero raises a real question — if there's no
+pod, what exactly are you monitoring? And a real gap surfaced while building
+Scenario 8: unlike Knative's Serverless mode, which has an Activator sitting
+in the request path to buffer a request while a cold pod boots, our
+KEDA-based approach (chosen specifically to avoid a Service Mesh dependency)
+does **not** buffer anything — a request arriving while replicas=0 has
+nothing to receive it and simply fails. This scenario shows how to actually
+observe that honestly, using signals that don't depend on the pod being
+alive, rather than pretending it isn't a tradeoff.
+
+**Monitoring layers (planned)**:
+1. **Replica count over time** — `kube_deployment_status_replicas{deployment="qwen-vllm-predictor"}`
+   (from kube-state-metrics, already scraped by OpenShift's own monitoring)
+   graphed on a new Grafana panel — this comes from the Deployment object's
+   status via the API server, so it works whether or not a pod currently
+   exists, and makes the 0↔1 transitions visible on a timeline.
+2. **KEDA's own trigger metric** — `keda-metrics-apiserver` exposes the
+   ScaledObject's current trigger value (e.g. queue depth) even at
+   replicas=0, so you can see the trigger climbing *before* KEDA actually
+   scales up — this is the signal that explains "why" a scale-up is about
+   to happen.
+3. **The cold-start gap, shown honestly** — send a request while replicas=0
+   and confirm what actually happens (connection refused / 5xx, not a
+   graceful queue) as a documented, demoed limitation of this approach
+   rather than a hidden one; discuss the standard mitigation (client-side
+   retry-with-backoff), since fixing it server-side would mean reintroducing
+   Knative's Activator (and Service Mesh) — the exact dependency this whole
+   design avoided.
+4. Once scaled up, vLLM's own Prometheus metrics (queue depth, latency,
+   tokens/sec) resume normally and are already wired into the existing
+   Thanos/Grafana stack.
+
+**Harness implementation not written yet** — needs Scenario 8's actual
+InferenceService/ScaledObject running first to build real dashboard panels
+and alerts against, verified live rather than guessed.
+
+---
+
 ## Unimplemented Scenarios (for reference, numbered per the original `openshift-monitoring` doc)
 
 The following are not yet automated in the harness. Detection conditions and
