@@ -43,9 +43,9 @@
 #   scenario7-chargeback-start                                                    team-workload-1 (1 GPU) + ResourceQuota capping the namespace at it
 #   scenario7-chargeback-trigger                                                    attempt a second GPU pod -> rejected at admission time
 #   scenario7-chargeback-stop                                                         delete pods + ResourceQuota
-#   scenario8-idle-reclaim-start                                                          idle-workload holds a GPU, does nothing
-#   scenario8-idle-reclaim-trigger                                                          samples utilization -> reclaims only if actually idle
-#   scenario8-idle-reclaim-stop                                                                delete idle-workload if still present
+#   scenario8-kserve-vllm-start                                                           deploy Qwen2.5-0.5B via KServe+vLLM, KEDA ScaledObject (min=0,max=1)
+#   scenario8-kserve-vllm-load                                                              send a real completion request (scales up from 0 if needed)
+#   scenario8-kserve-vllm-stop                                                                delete the InferenceService/ServingRuntime/KEDA objects
 #   scenario9-dynamic-reclaim-start                                                                anchor pod + dynamic pod -> MachineAutoscaler scale-out
 #   scenario9-dynamic-reclaim-trigger                                                                samples dynamic pod's utilization -> reclaims if idle
 #   scenario9-dynamic-reclaim-stop                                                                    delete both pods, reset MachineSet to 1 replica
@@ -401,19 +401,19 @@ cmd_scenario7_chargeback_stop() {
     < ./remote/scenario7-chargeback-stop.sh
 }
 
-cmd_scenario8_idle_reclaim_start() {
-  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-idle-scenario-8}' bash -s" \
-    < ./remote/scenario8-idle-reclaim-start.sh
+cmd_scenario8_kserve_vllm_start() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-kserve-scenario-8}' INSTANCE_TYPE='${INSTANCE_TYPE:-g4dn.xlarge}' bash -s" \
+    < ./remote/scenario8-kserve-vllm-start.sh
 }
 
-cmd_scenario8_idle_reclaim_trigger() {
-  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-idle-scenario-8}' IDLE_THRESHOLD_PCT='${IDLE_THRESHOLD_PCT:-3}' bash -s" \
-    < ./remote/scenario8-idle-reclaim-trigger.sh
+cmd_scenario8_kserve_vllm_load() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-kserve-scenario-8}' bash -s" \
+    < ./remote/scenario8-kserve-vllm-load.sh
 }
 
-cmd_scenario8_idle_reclaim_stop() {
-  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-idle-scenario-8}' bash -s" \
-    < ./remote/scenario8-idle-reclaim-stop.sh
+cmd_scenario8_kserve_vllm_stop() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-kserve-scenario-8}' bash -s" \
+    < ./remote/scenario8-kserve-vllm-stop.sh
 }
 
 cmd_scenario9_dynamic_reclaim_start() {
@@ -457,9 +457,9 @@ cmd_push_scenario_scripts() {
     "scenario7-chargeback-start.sh:scenario7-chargeback-start.sh"
     "scenario7-chargeback-trigger.sh:scenario7-chargeback-trigger.sh"
     "scenario7-chargeback-stop.sh:scenario7-chargeback-stop.sh"
-    "scenario8-idle-reclaim-start.sh:scenario8-idle-reclaim-start.sh"
-    "scenario8-idle-reclaim-trigger.sh:scenario8-idle-reclaim-trigger.sh"
-    "scenario8-idle-reclaim-stop.sh:scenario8-idle-reclaim-stop.sh"
+    "scenario8-kserve-vllm-start.sh:scenario8-kserve-vllm-start.sh"
+    "scenario8-kserve-vllm-load.sh:scenario8-kserve-vllm-load.sh"
+    "scenario8-kserve-vllm-stop.sh:scenario8-kserve-vllm-stop.sh"
     "scenario9-dynamic-reclaim-start.sh:scenario9-dynamic-reclaim-start.sh"
     "scenario9-dynamic-reclaim-trigger.sh:scenario9-dynamic-reclaim-trigger.sh"
     "scenario9-dynamic-reclaim-stop.sh:scenario9-dynamic-reclaim-stop.sh"
@@ -560,9 +560,9 @@ case "$cmd" in
   scenario7-chargeback-start)                                                   cmd_scenario7_chargeback_start ;;
   scenario7-chargeback-trigger)                                                   cmd_scenario7_chargeback_trigger ;;
   scenario7-chargeback-stop)                                                        cmd_scenario7_chargeback_stop ;;
-  scenario8-idle-reclaim-start)                                                         cmd_scenario8_idle_reclaim_start ;;
-  scenario8-idle-reclaim-trigger)                                                         cmd_scenario8_idle_reclaim_trigger ;;
-  scenario8-idle-reclaim-stop)                                                              cmd_scenario8_idle_reclaim_stop ;;
+  scenario8-kserve-vllm-start)                                                          cmd_scenario8_kserve_vllm_start ;;
+  scenario8-kserve-vllm-load)                                                             cmd_scenario8_kserve_vllm_load ;;
+  scenario8-kserve-vllm-stop)                                                               cmd_scenario8_kserve_vllm_stop ;;
   scenario9-dynamic-reclaim-start)                                                              cmd_scenario9_dynamic_reclaim_start ;;
   scenario9-dynamic-reclaim-trigger)                                                              cmd_scenario9_dynamic_reclaim_trigger ;;
   scenario9-dynamic-reclaim-stop)                                                                 cmd_scenario9_dynamic_reclaim_stop ;;

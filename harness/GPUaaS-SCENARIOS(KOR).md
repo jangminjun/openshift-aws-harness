@@ -493,17 +493,15 @@ pod 자체가 생성조차 안 됨(`oc get pods`에 안 뜸) — 스케줄러가
 
 ## 시나리오 8 — KServe + vLLM 유휴 회수 (Scale-to-Zero)
 
-> **상태: 설계 확정(플랫폼 공식 지원 패턴 기준), harness 구현·실측 검증 진행 중
-> (2026-08-20 작성 — 최초 버전은 커스텀 폴링 스크립트였으나, 실제 서빙
-> 플랫폼(KServe)이 이 문제를 어떻게 네이티브로 푸는지 보여주는 쪽으로
-> 재설계함. 폴링 기반 "실측 후 회수" 아이디어 자체는 [시나리오 9](#시나리오-9--동적-할당--전체-자원-회수-dynamic-allocation--full-reclaim)에
-> 그대로 살아있음).**
+> **상태: harness 반영 + 실측 검증 완료, 스케일다운은 정상 동작·스케일업은
+> 알려진 구조적 한계 확인 (2026-08-20).**
 
 **보여주는 것**: 실제 GPUaaS 플랫폼이라면 유휴 GPU를 사람이 지켜보다가
 지우는 게 아니라, **서빙 플랫폼 자체가 트래픽을 보고 자동으로 반납**한다.
 KServe로 vLLM 모델을 서빙하다가 요청이 안 오면 자동으로 replica가 0으로
-줄어서(GPU 완전 반납) 다른 팀이 쓸 수 있게 되고, 요청이 다시 오면 자동으로
-떠오른다.
+줄어서(GPU 완전 반납) 다른 팀이 쓸 수 있게 된다. (아래 실측에서 확인했듯,
+"요청이 오면 자동으로 다시 떠오른다"는 이 구성에서는 안 됨 — 그 이유와
+대안까지 정직하게 다룬다.)
 
 **왜 Knative Serverless가 아니라 KEDA인가**: KServe의 scale-to-zero는
 원래 Knative(Serverless) 배포 모드의 기능인데, 이 클러스터의 RHOAI는
@@ -514,31 +512,83 @@ Service Mesh 의존성을 피하려고 `remote/rhoai.sh`에서 일부러
 **OpenShift Custom Metrics Autoscaler(KEDA 기반) 오퍼레이터**를 추가해서
 KServe의 기본 HPA를 끄고(`serving.kserve.io/autoscalerClass: external`)
 KEDA `ScaledObject`로 대체하면, Service Mesh/Knative 없이도
-`minReplicaCount: 0`까지 스케일다운된다. 이 클러스터에 이미 깔려있는
-Service Mesh 회피 결정을 안 뒤엎는 방법이라 채택함.
+`minReplicaCount: 0`까지 스케일다운된다.
 
-**구성 (계획)**:
+**구성**:
 - `openshift-custom-metrics-autoscaler-operator` 설치 (네임스페이스
   `openshift-keda`, channel `stable`) + `KedaController` CR
-- RHOAI의 실제 vLLM `ServingRuntime`으로 `Qwen/Qwen2.5-0.5B-Instruct`
-  (5억 파라미터급 소형 공개 모델 — 로드/스케일업이 빨라 라이브 데모에 적합)
-  서빙하는 `InferenceService` 배포, `RawDeployment` 모드 유지
-- `KEDA ScaledObject`가 Thanos Querier의 vLLM 큐 메트릭
-  (`vllm:num_requests_waiting`) 또는 DCGM GPU 사용률을 트리거로 삼아
-  0 ↔ N(기본 2) 스케일
+- RHOAI의 실제 vLLM `ServingRuntime`(`vllm-cuda-runtime`)으로
+  `Qwen/Qwen2.5-0.5B-Instruct` 서빙하는 `InferenceService`, `RawDeployment`
+  모드
+- `KEDA ScaledObject`(`minReplicaCount: 0`, `maxReplicaCount: 1` — GPU
+  1장뿐이라)가 Thanos Querier의 vLLM 큐 메트릭
+  (`vllm:num_requests_waiting`)을 트리거로 삼아 스케일
 
-**실행 (구현 완료 후 갱신 예정)**:
+**실행**:
 ```bash
 # 로컬에서
 ./harness.sh scenario8-kserve-vllm-start      # InferenceService + KEDA ScaledObject 배포
-./harness.sh scenario8-kserve-vllm-load       # 실제 추론 요청 전송 -> 스케일업 확인
+./harness.sh scenario8-kserve-vllm-load       # 실제 추론 요청 전송 (0이면 수동 스케일업 후 전송)
 ./harness.sh scenario8-kserve-vllm-stop       # 정리
+
+# 또는 bastion에서 직접
+~/scenario8-kserve-vllm-start.sh
+~/scenario8-kserve-vllm-load.sh
+~/scenario8-kserve-vllm-stop.sh
 ```
 
-**검증할 것**: replica가 실제로 0에서 시작(또는 유휴 후 0으로 감), 실제
-추론 요청을 보내면 KEDA가 스케일업해서 요청이 성공, 요청을 멈추면 idle
-윈도우 후 다시 0으로 스케일다운 — 이 세 전환을 전부 라이브로 실측 확인한
-뒤 실측 타이밍(스케일업/다운 소요 시간)을 이 섹션에 기록할 예정.
+**실측하며 발견한 실제 문제들 (전부 스크립트에 해결/반영됨)**:
+1. **`storageUri: hf://...`가 기본적으로 안 됨** — RHOAI 2.25.8에
+   `ClusterStorageContainer`가 `hf://` 정규식을 등록해둔 게 하나도 없어서,
+   직접 만들어야 했다 (`hf-hub`, RHOAI 자체 `odh-kserve-storage-initializer-rhel9`
+   이미지 사용). 만들고 나니 실제로 HuggingFace에서 바로 다운로드됨
+   (모델 다운로드 **11초**).
+2. **T4에서 CUDA 그래프 캡처가 무한 행(hang)됨** — GPU 사용률 0%, 전력
+   27W(거의 유휴)로 3분 넘게 멈춰있는 걸 nvidia-smi로 직접 확인. vLLM 로그가
+   이미 힌트를 줬던 `--enforce-eager`로 해결(그래프 캡처 자체를 건너뜀) —
+   임시방편이 아니라 이 GPU에서는 영구적으로 필요.
+3. **기본 컨테이너 메모리 한도(8Gi)로 OOMKilled** — 모델 로딩까지는
+   성공하고 그 직후(exitCode 137, OOMKilled) 죽음. 12Gi로 올리니 해결.
+4. **GPU 1장뿐인 클러스터에서 롤링 업데이트가 데드락에 빠짐** — 위 2·3번을
+   고치려고 스펙을 바꿀 때마다, 옛 ReplicaSet의 pod가 GPU를 붙잡은 채
+   재시작을 반복하고 새 ReplicaSet의 pod는 GPU가 없어서 영원히 `Pending`.
+   `oc delete rs <old-replicaset>`로 옛것부터 강제로 치워야 새 pod가
+   스케줄됨 — GPU가 1장뿐인 환경의 반복 실측된 패턴.
+
+**실측 결과**:
+- 콜드스타트(스케줄 → Ready): 모델 다운로드(11초) + vLLM eager 모드 로딩
+  포함 **약 75~90초**
+- 실제 추론 요청 확인: `"The capital of France is"` → `" Paris. It is the
+  most populous city in Europe"` (정상 응답)
+- KServe 자체 HPA는 실제로 안 만들어짐(`autoscalerClass: external` 확인) —
+  `keda-hpa-qwen-vllm-scaledobject`만 존재
+- **스케일다운(1→0)**: ScaledObject가 Ready 되자마자 **첫 평가에서 즉시**
+  트리거 비활성 감지 → deactivate (`KEDAScaleTargetDeactivated`) — 사실상
+  즉각적. 폴링 주기(15초)조차 기다릴 필요 없이 첫 reconcile에서 바로 일어남
+- **스케일업(0→1, 요청 감지 기반)**: **안 됨 — 확정.** Thanos에
+  `vllm:num_requests_waiting` 쿼리를 날려보면 replica가 0일 때
+  `"result":[]`(완전히 빈 결과, 0도 아니고 데이터 자체가 없음)가 나온다 —
+  pod가 없으면 그 메트릭을 낼 주체가 아예 없기 때문. KEDA는 요청 경로
+  밖에서 메트릭만 폴링하는 구조라, 이 메트릭으로는 "요청이 왔다"는 걸
+  구조적으로 감지할 수 없다.
+- **replica 0일 때 실제 요청을 보내면**: `curl`이 **DNS 조회 단계에서부터
+  실패**한다(`Could not resolve host`) — "connection refused"보다 더 앞
+  단계에서 막힌다. 이유: predictor `Service`가 headless(`ClusterIP: None`)
+  라서, 뒤에 pod(엔드포인트)가 하나도 없으면 DNS가 아예 레코드를 안
+  돌려준다.
+
+**결론 — 레드햇 권고 관점**: 실제로 참고한 Red Hat 문서(KServe+KEDA
+아티클)의 예시조차 `minReplicaCount: 1`을 쓴다(0이 아님) — 즉 레드햇이
+이 조합(RawDeployment+KEDA)으로 공식 권장하는 건 **"이미 떠 있는 상태에서
+부하 따라 탄력적으로 늘고 주는 것"**이지, "0에서 요청 오면 깨어나는 것"은
+애초에 이 조합의 타겟이 아니다. 진짜 요청 기반 wake-from-zero는
+레드햇 기준으로도 **KServe Serverless(Knative) 모드가 공식 방법**이고,
+이건 우리가 Service Mesh를 피하려고 처음부터 포기한 바로 그 의존성이다.
+(대안으로 KEDA HTTP Add-on이라는 커뮤니티 프로젝트가 있어 Service Mesh
+없이 요청 기반 wake-up을 구현할 수 있지만, 레드햇 공식 지원 여부는
+확인되지 않음 — 필요시 다음 세션에서 검토.) 데모에서는 "스케일다운은
+완전 자동, 스케일업은 (현재 구성으로는) 수동/외부 트리거가 필요하다"는
+정직한 트레이드오프로 설명하는 걸 추천.
 
 Sources: [How to set up KServe autoscaling for vLLM with KEDA](https://developers.redhat.com/articles/2025/09/23/how-set-kserve-autoscaling-vllm-keda),
 [Custom Metrics Autoscaler on OpenShift](https://www.redhat.com/en/blog/custom-metrics-autoscaler-on-openshift),

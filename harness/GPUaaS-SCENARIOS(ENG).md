@@ -533,19 +533,17 @@ standing one up is a separate MachineSet exercise out of scope here.
 
 ## Scenario 8 — KServe + vLLM Scale-to-Zero
 
-> **Status: design confirmed (grounded in an officially-documented Red Hat
-> pattern), harness implementation and live validation in progress
-> (2026-08-20 — the original version was a custom polling script; redesigned
-> to show how the serving platform itself, KServe, solves this natively
-> instead. The polling-based "measure before reclaiming" idea lives on as-is
-> in [Scenario 9](#scenario-9--dynamic-allocation--full-reclaim)).**
+> **Status: wired into the harness + measurement-validated. Scale-down
+> works correctly; scale-up has a confirmed structural limitation
+> (2026-08-20).**
 
 **What it shows**: in a real GPUaaS platform, an idle GPU shouldn't need a
 human (or a script) watching it and deleting things — **the serving
 platform itself should give it back automatically based on real traffic**.
 Serving a vLLM model through KServe, replicas scale to 0 (full GPU release)
-automatically once requests stop, and scale back up automatically the moment
-a new request arrives.
+automatically once requests stop. (As measured below, "scales back up
+automatically the moment a new request arrives" does **not** hold for this
+particular setup — the honest reason, and the alternative, are covered too.)
 
 **Why KEDA instead of Knative Serverless**: KServe's scale-to-zero is
 normally a feature of its Knative (Serverless) deployment mode, but this
@@ -556,34 +554,84 @@ RawDeployment doesn't support scale-to-zero on its own — but Red Hat
 documented an officially-supported way to get it anyway in late 2025: add the
 **OpenShift Custom Metrics Autoscaler (KEDA-based) operator**, disable
 KServe's built-in HPA (`serving.kserve.io/autoscalerClass: external`), and
-replace it with a KEDA `ScaledObject` that supports `minReplicaCount: 0` —
-no Service Mesh or Knative required, so it doesn't reverse the earlier
-decision to avoid them.
+replace it with a KEDA `ScaledObject` that supports `minReplicaCount: 0`.
 
-**Setup (planned)**:
-- Install `openshift-custom-metrics-autoscaler-operator` (namespace
-  `openshift-keda`, channel `stable`) + a `KedaController` CR
-- Deploy an `InferenceService` serving `Qwen/Qwen2.5-0.5B-Instruct` (a small
-  ~0.5B-parameter public model chosen for fast load/scale-up in a live demo)
-  through RHOAI's actual vLLM `ServingRuntime`, staying in `RawDeployment`
-  mode
-- A `KEDA ScaledObject` triggers on the Thanos Querier vLLM queue metric
-  (`vllm:num_requests_waiting`) or DCGM GPU utilization, scaling 0 ↔ N
-  (default max 2)
+**Setup**:
+- `openshift-custom-metrics-autoscaler-operator` (namespace `openshift-keda`,
+  channel `stable`) + a `KedaController` CR
+- An `InferenceService` serving `Qwen/Qwen2.5-0.5B-Instruct` through RHOAI's
+  actual vLLM `ServingRuntime` (`vllm-cuda-runtime`), `RawDeployment` mode
+- A `KEDA ScaledObject` (`minReplicaCount: 0`, `maxReplicaCount: 1` — only
+  one GPU exists) triggered on the Thanos Querier vLLM queue metric
+  (`vllm:num_requests_waiting`)
 
-**Run (to be finalized once implemented)**:
+**Run**:
 ```bash
 # locally
 ./harness.sh scenario8-kserve-vllm-start      # deploy InferenceService + KEDA ScaledObject
-./harness.sh scenario8-kserve-vllm-load       # send a real inference request -> confirm scale-up
+./harness.sh scenario8-kserve-vllm-load       # send a real inference request (manually scales up from 0 if needed)
 ./harness.sh scenario8-kserve-vllm-stop       # cleanup
+
+# or directly on the bastion
+~/scenario8-kserve-vllm-start.sh
+~/scenario8-kserve-vllm-load.sh
+~/scenario8-kserve-vllm-stop.sh
 ```
 
-**To validate**: replicas genuinely start at (or fall back to) 0; sending a
-real inference request makes KEDA scale up and the request succeeds; once
-requests stop, it scales back to 0 after the idle window — all three
-transitions need to be observed live, with the measured scale-up/scale-down
-timings recorded here once done.
+**Real problems hit while building this (all fixed, encoded in the scripts)**:
+1. **`storageUri: hf://...` doesn't work out of the box** — RHOAI 2.25.8
+   ships no `ClusterStorageContainer` registering the `hf://` regex, so one
+   had to be created (`hf-hub`, using RHOAI's own
+   `odh-kserve-storage-initializer-rhel9` image). Once added, it genuinely
+   pulled from Hugging Face (model download: **11 seconds**).
+2. **CUDA graph capture hangs forever on this T4** — confirmed via
+   `nvidia-smi`: 0% GPU utilization, 27W (near-idle) power draw, stuck for
+   3+ minutes at a fixed capture step. `--enforce-eager` (skips graph
+   capture) fixes it — not a one-time workaround, this needs to stay on
+   permanently for this GPU.
+3. **Default 8Gi container memory limit gets OOMKilled** — the process dies
+   (exit 137, OOMKilled) right after model load finishes. Raising it to 12Gi
+   fixed it.
+4. **A rolling update deadlocks on a single-GPU cluster** — every time #2/#3
+   above required a spec change, the old ReplicaSet's pod kept holding the
+   only GPU and crash-looping while the new ReplicaSet's pod sat `Pending`
+   forever with nowhere to schedule. `oc delete rs <old-replicaset>` to
+   force it out is required — a pattern that repeated every single time.
+
+**Measured results**:
+- Cold start (scheduled → Ready): model download (11s) + vLLM eager-mode
+  load, **~75-90 seconds total**
+- Real inference confirmed: `"The capital of France is"` → `" Paris. It is
+  the most populous city in Europe"` (correct, coherent completion)
+- KServe's own HPA is genuinely absent (`autoscalerClass: external`
+  confirmed working) — only `keda-hpa-qwen-vllm-scaledobject` exists
+- **Scale-down (1→0)**: near-instantaneous — KEDA deactivated the target on
+  its very first reconcile after the ScaledObject became Ready
+  (`KEDAScaleTargetDeactivated`), without even waiting a full polling
+  interval (15s)
+- **Scale-up (0→1, on request) — confirmed NOT working**: querying Thanos
+  for `vllm:num_requests_waiting` while at 0 replicas returns `"result":[]`
+  — a completely empty result, not even a zero — because there's no pod to
+  emit that metric in the first place. KEDA polls metrics from outside the
+  request path, so it has no way to observe an incoming request when
+  nothing is running to report on it.
+- **A real request at 0 replicas**: `curl` fails at **DNS resolution**
+  (`Could not resolve host`), a step earlier than "connection refused" —
+  because the predictor `Service` is headless (`ClusterIP: None`), and DNS
+  returns no records at all once it has zero backing endpoints.
+
+**Conclusion — what Red Hat actually recommends**: even the Red Hat article
+this was built from uses `minReplicaCount: 1` in its own example (not 0) —
+meaning Red Hat's own documented guidance for RawDeployment+KEDA targets
+**elastic scaling among already-warm replicas under load**, not genuine
+wake-from-zero. True request-triggered scale-from-zero is, by Red Hat's own
+architecture, a **KServe Serverless (Knative)** feature — precisely the
+dependency this whole design avoided to sidestep Service Mesh. (The KEDA
+HTTP Add-on is a community project that can add request-based wake-up
+without full Service Mesh, but Red Hat's official support for it wasn't
+confirmed — worth evaluating in a future session.) For the demo: present
+scale-down as fully automatic and scale-up as currently requiring a
+manual/external trigger — an honest tradeoff, not a bug.
 
 Sources: [How to set up KServe autoscaling for vLLM with KEDA](https://developers.redhat.com/articles/2025/09/23/how-set-kserve-autoscaling-vllm-keda),
 [Custom Metrics Autoscaler on OpenShift](https://www.redhat.com/en/blog/custom-metrics-autoscaler-on-openshift),
