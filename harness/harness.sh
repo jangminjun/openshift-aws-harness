@@ -42,7 +42,8 @@
 #   scenario7-chargeback-start                                                    team-workload-1 (1 GPU) + ResourceQuota capping the namespace at it
 #   scenario7-chargeback-trigger                                                    attempt a second GPU pod -> rejected at admission time
 #   scenario7-chargeback-stop                                                         delete pods + ResourceQuota
-#   all                                    run the full cluster+GPU+RHOAI sequence, end to end
+#   push-scenario-scripts                     copy scenario1-4 convenience scripts to ~/ on the bastion
+#   all                                    full sequence: cluster+admin-user+g5/g6 GPU+RHOAI+monitoring, end to end
 #   destroy-cluster                          openshift-install destroy cluster
 #   destroy-bastion --yes                      tear down bastion + its network (destructive)
 #
@@ -391,6 +392,42 @@ cmd_scenario7_chargeback_stop() {
     < ./remote/scenario7-chargeback-stop.sh
 }
 
+# Copies standalone convenience copies of the scenario scripts onto the
+# bastion under the exact names the SCENARIOS docs reference (e.g.
+# ~/scenario1-autoscale-start.sh), so a demo can run them directly over SSH
+# without a local harness checkout. scenario1/2 "stop" only exists inline in
+# this file (a plain `oc delete`), so it's mirrored into its own remote/*.sh
+# here purely so it has something to copy.
+cmd_push_scenario_scripts() {
+  local pairs=(
+    "scenario1-autoscale-demo.sh:scenario1-autoscale-start.sh"
+    "scenario1-autoscale-stop.sh:scenario1-autoscale-stop.sh"
+    "scenario2-alert-demo.sh:scenario2-alert-start.sh"
+    "scenario2-alert-stop.sh:scenario2-alert-stop.sh"
+    "scenario3-powercap-start.sh:scenario3-powercap-start.sh"
+    "scenario3-powercap-apply.sh:scenario3-powercap-apply.sh"
+    "scenario3-powercap-stop.sh:scenario3-powercap-stop.sh"
+    "scenario4-fault-start.sh:scenario4-fault-start.sh"
+    "scenario4-fault-trigger.sh:scenario4-fault-trigger.sh"
+    "scenario4-fault-stop.sh:scenario4-fault-stop.sh"
+    "scenario5-badcode-start.sh:scenario5-badcode-start.sh"
+    "scenario5-badcode-stop.sh:scenario5-badcode-stop.sh"
+    "scenario6-preempt-start.sh:scenario6-preempt-start.sh"
+    "scenario6-preempt-trigger.sh:scenario6-preempt-trigger.sh"
+    "scenario6-preempt-stop.sh:scenario6-preempt-stop.sh"
+    "scenario7-chargeback-start.sh:scenario7-chargeback-start.sh"
+    "scenario7-chargeback-trigger.sh:scenario7-chargeback-trigger.sh"
+    "scenario7-chargeback-stop.sh:scenario7-chargeback-stop.sh"
+  )
+  local pair src dst
+  for pair in "${pairs[@]}"; do
+    src="${pair%%:*}"; dst="${pair##*:}"
+    scp_to_bastion "./remote/${src}" "~/${dst}"
+  done
+  ssh_bastion "chmod +x ~/scenario*.sh"
+  log "Pushed ${#pairs[@]} scenario convenience scripts to the bastion (~/scenario*.sh)."
+}
+
 cmd_destroy_cluster() {
   ssh_bastion 'export PATH=$PATH:/usr/local/bin; cd ~/ocp-install && openshift-install destroy cluster --dir=. --log-level=info'
 }
@@ -425,8 +462,15 @@ cmd_all() {
   cmd_wait_cluster
   cmd_create_admin_user
   cmd_gpu_machineset
+  GPU_INSTANCE_TYPE="${POWERCAP_INSTANCE_TYPE:-g6.2xlarge}" \
+  GPU_MACHINESET_AZ="${POWERCAP_MACHINESET_AZ:-us-east-1a}" \
+  GPU_REPLICAS="${POWERCAP_GPU_REPLICAS:-1}" \
+  GPU_MIN_REPLICAS="${POWERCAP_GPU_MIN_REPLICAS:-1}" \
+  GPU_MAX_REPLICAS="${POWERCAP_GPU_MAX_REPLICAS:-2}" \
+    cmd_gpu_machineset
   cmd_gpu_operator
   cmd_rhoai
+  cmd_monitoring_all
 }
 
 case "$cmd" in
@@ -469,6 +513,7 @@ case "$cmd" in
   scenario7-chargeback-start)                                                   cmd_scenario7_chargeback_start ;;
   scenario7-chargeback-trigger)                                                   cmd_scenario7_chargeback_trigger ;;
   scenario7-chargeback-stop)                                                        cmd_scenario7_chargeback_stop ;;
+  push-scenario-scripts)               cmd_push_scenario_scripts ;;
   destroy-cluster)                     cmd_destroy_cluster ;;
   destroy-bastion)                      cmd_destroy_bastion "$@" ;;
   all)                                    cmd_all ;;
