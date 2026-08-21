@@ -494,7 +494,16 @@ GPU 메모리 사용량은 세 워크로드 다 비슷한 범위(~380\~450MB)인
 
 ## 시나리오 6 — PriorityClass 하향 및 Preemption 실효성 증명
 
-> **상태: harness 반영 + 실측 검증 완료 (2026-08-14).**
+> **상태: harness 반영 + 실측 검증 완료 (2026-08-14, 기본값은 2026-08-21에
+> g4dn.xlarge로 변경 후 재검증).**
+
+> **참고**: `INSTANCE_TYPE` 기본값은 원래 `g5.2xlarge`였으나 2026-08-21에
+> `g4dn.xlarge`로 바꿨다 — g5.2xlarge용 `MachineAutoscaler`가 지금 클러스터엔
+> 없어서(0/0으로 스케일다운됨) 기본값 그대로 돌리면 실패했기 때문. 이제
+> 기본값 자체가 [시나리오 6-1](#시나리오-6-1--gpu-노드가-1대로-고정돼-있을-때의-preemption)과
+> 동일한 방식(노드가 이미 1대로 고정된 flavor 재사용)으로 동작한다.
+> g5.2xlarge로 돌리려면 `INSTANCE_TYPE=g5.2xlarge`를 오버라이드하고, 그
+> 전에 g5.2xlarge용 `MachineAutoscaler`(min=1, max=2)를 먼저 재생성해야 한다.
 
 **보여주는 것**: 시나리오 5에서 "비효율 코드"로 지적된 팀에게 인프라팀이
 PriorityClass를 Low로 낮췄다고 하자 — 그런데 이게 진짜 효과가 있나?
@@ -503,29 +512,31 @@ PriorityClass를 Low로 낮췄다고 하자 — 그런데 이게 진짜 효과�
 실제로 확인한다. 문서의 "PriorityClass Low 하향 → 자원 부족 시 즉시
 Preemption 대상"을 그대로 재현.
 
-**핵심 설계 — 오토스케일러와의 경쟁 상태 제거**: `bad-code-workload`와
-`legitimate-workload`를 같은 GPU 플레이버(g5.2xlarge, 노드 1대/GPU 1장)에
-몰아넣어서 "자리가 없어야" Preemption이 의미가 있는데, 이대로 두면
-`MachineAutoscaler`가 새 노드를 추가해서 Preemption 없이도 해결해버릴 수
-있다(경쟁 상태). 그래서 `scenario6-preempt-start.sh`가 g5
-MachineAutoscaler의 `max`를 **현재 replica 수(1)로 일시적으로 고정**해서
-오토스케일 자체를 원천 차단한다 — Preemption이 유일한 해결책이 되도록.
-`scenario6-preempt-stop.sh`가 다시 2로 복원한다.
+**핵심 설계 — 오토스케일러와의 경쟁 상태 제거**: `low-priority-workload`와
+`high-priority-workload`를 같은 GPU 플레이버(노드 1대/GPU 1장)에 몰아넣어서
+"자리가 없어야" Preemption이 의미가 있는데, 이대로 두면 `MachineAutoscaler`가
+새 노드를 추가해서 Preemption 없이도 해결해버릴 수 있다(경쟁 상태). 그래서
+`scenario6-preempt-start.sh`가 MachineAutoscaler의 `max`를 **현재 replica
+수(1)로 일시적으로 고정**해서 오토스케일 자체를 원천 차단한다 — Preemption이
+유일한 해결책이 되도록. `scenario6-preempt-stop.sh`가 원래 값으로 복원한다.
+(pod 이름은 시나리오 5의 `bad-code-workload`와 헷갈리지 않도록
+`low-priority-workload`/`high-priority-workload`로 지었다 — 2026-08-21에
+`bad-code-workload`/`legitimate-workload`에서 리네이밍.)
 
 **구성**:
 - `PriorityClass/low-priority-team` (value: -1000000) — "시나리오 5에서
   적발된 팀에게 부여" 컨셉
-- `bad-code-workload`: `priorityClassName: low-priority-team`, g5.2xlarge
-  고정, GPU 1장 요청 — 유일한 GPU를 선점
-- `legitimate-workload`: 기본 우선순위(PriorityClass 미지정, 기본값 0 >
-  -1000000), 동일하게 g5.2xlarge 고정, GPU 1장 요청
+- `low-priority-workload`: `priorityClassName: low-priority-team`, 대상
+  flavor 고정, GPU 1장 요청 — 유일한 GPU를 선점
+- `high-priority-workload`: 기본 우선순위(PriorityClass 미지정, 기본값 0 >
+  -1000000), 동일하게 대상 flavor 고정, GPU 1장 요청
 
 **실행**:
 ```bash
-# 로컬에서
-./harness.sh scenario6-preempt-start      # bad-code-workload가 low-priority로 GPU 선점
-./harness.sh scenario6-preempt-trigger    # legitimate-workload 배포 -> Preemption 확인
-./harness.sh scenario6-preempt-stop       # 정리 + MachineAutoscaler max 원복(2)
+# 로컬에서 (기본값 g4dn.xlarge)
+./harness.sh scenario6-preempt-start      # low-priority-workload가 low-priority로 GPU 선점
+./harness.sh scenario6-preempt-trigger    # high-priority-workload 배포 -> Preemption 확인
+./harness.sh scenario6-preempt-stop       # 정리 + MachineAutoscaler max 원복(1)
 ```
 
 **지켜볼 것**:
@@ -534,20 +545,64 @@ oc get pods -n gpu-preempt-scenario-6 -w
 oc get events -n gpu-preempt-scenario-6 --field-selector reason=Preempted
 ```
 
-**실측 결과** (2026-08-14): `bad-code-workload`가 `low-priority-team`으로
-g5의 유일한 GPU에서 `Running` 중인 상태에서 `legitimate-workload`(기본
-우선순위) 배포 → **약 34초 만에** 다음 이벤트 확인:
+**실측 결과** (2026-08-21, `INSTANCE_TYPE=g4dn.xlarge`): `low-priority-workload`가
+`low-priority-team`으로 유일한 GPU에서 `Running` 중인 상태에서
+`high-priority-workload`(기본 우선순위) 배포 → **약 33초 만에** 다음 이벤트 확인
+(리네이밍 전 실측이라 이벤트 로그의 pod 이름은 `bad-code-workload`로 남아있음,
+동작은 동일):
 ```
-Normal   Preempted   pod/bad-code-workload   Preempted by pod 9a6d9af0-... on node ip-10-0-1-245.ec2.internal
+Normal   Preempted   pod/bad-code-workload   Preempted by pod 5a42ffd4-... on node ip-10-0-30-108.ec2.internal
 ```
-`bad-code-workload`는 축출되어 사라졌고(`Gone`), `legitimate-workload`가
-그 GPU에서 `Running`으로 전환됨. Kubernetes 이벤트 로그에 "Preempted by
-pod ..."가 명시적으로 남아서, 우연한 재시작이 아니라 **진짜 Preemption이
-일어났다는 증거**가 된다.
+저priority pod는 축출되어 사라졌고(`Gone`), 정상 우선순위 pod가 그 GPU에서
+`Running`으로 전환됨. Kubernetes 이벤트 로그에 "Preempted by pod ..."가
+명시적으로 남아서, 우연한 재시작이 아니라 **진짜 Preemption이 일어났다는
+증거**가 된다. (참고: 2026-08-14에는 g5.2xlarge로 동일하게 검증했고 약 34초가
+걸렸다 — 결과는 사실상 동일.)
 
 **정리**: `scenario6-preempt-stop.sh` 한 번으로 pod 삭제 +
-MachineAutoscaler max 원복(2)까지 다 처리됨. 트리거 도중 중단해도 이
-스크립트로 클러스터가 원래 상태(각 플레이버 min=1/max=2)로 돌아온다.
+MachineAutoscaler max 원복까지 다 처리됨. 트리거 도중 중단해도 이 스크립트로
+클러스터가 원래 상태로 돌아온다.
+
+---
+
+## 시나리오 6-1 — GPU 노드가 1대로 고정돼 있을 때의 Preemption
+
+> **상태: 실측 검증 완료 (2026-08-21).**
+
+**적용 대상**: 특정 GPU flavor가 노드 1대로 고정돼 있어(그 타입의
+`MachineAutoscaler`가 `min=max=1`이든, `MachineAutoscaler` 자체가 아예
+없든) 스케일아웃 여지가 없는 경우 — 새 스크립트 없이 시나리오 6의 스크립트를
+그 flavor에 그대로 재사용하면 된다. 처음부터 여유가 없으므로
+`scenario6-preempt-start.sh`의 "max를 현재 replica 수로 고정" 패치는
+사실상 no-op이 되고(이미 고정돼 있으니), MachineSet이 새로 뜨길 기다릴
+필요도 없다.
+
+**실행**: 시나리오 6의 `INSTANCE_TYPE` 기본값이 이제 `g4dn.xlarge`라서, 이
+데모는 사실상 시나리오 6을 기본값 그대로 돌리는 것과 같다 — 네임스페이스만
+구분하고 싶을 때 아래처럼 명시:
+```bash
+# 로컬에서
+INSTANCE_TYPE=g4dn.xlarge DEMO_NAMESPACE=gpu-preempt-scenario-6-1 ./harness.sh scenario6-preempt-start
+INSTANCE_TYPE=g4dn.xlarge DEMO_NAMESPACE=gpu-preempt-scenario-6-1 ./harness.sh scenario6-preempt-trigger
+INSTANCE_TYPE=g4dn.xlarge DEMO_NAMESPACE=gpu-preempt-scenario-6-1 ./harness.sh scenario6-preempt-stop
+```
+
+**지켜볼 것**:
+```bash
+oc get pods -n gpu-preempt-scenario-6-1 -w
+oc get events -n gpu-preempt-scenario-6-1 --field-selector reason=Preempted
+```
+
+**실측 결과** (2026-08-21, `INSTANCE_TYPE=g4dn.xlarge`, 이미 1/1로 떠 있던
+기존 노드 그대로 사용 — 새 노드 부팅 대기 없이 즉시 `low-priority-workload`가
+`Running`): `high-priority-workload` 배포 후 **약 33초 만에** Preemption 확인
+(이 실측 자체는 리네이밍 전이라 pod 이름은 `bad-code-workload`로 찍힘).
+```
+Normal   Preempted   pod/bad-code-workload   Preempted by pod 5a42ffd4-... on node ip-10-0-30-108.ec2.internal
+```
+시나리오 6과 결과는 동일 — MachineAutoscaler를 그때그때 새로 잠그든, 애초에
+잠겨 있었든(혹은 없든) 상관없이 스케일아웃 여지가 없으면 Preemption이
+확실하게 일어난다.
 
 ---
 
@@ -568,7 +623,9 @@ MachineAutoscaler max 원복(2)까지 다 처리됨. 트리거 도중 중단해�
 "이게 실제 AWS 청구액과 정확히 일치한다"고 과장하지 말 것.
 
 **구성**:
-- `team-workload-1`: GPU 1장 요청, 배포 (그 팀의 "이미 쓰고 있는" 사용량 흉내)
+- `team-workload-1`: GPU 1장 요청, 배포 (그 팀의 "이미 쓰고 있는" 사용량 흉내).
+  `INSTANCE_TYPE` 기본값은 `g4dn.xlarge`(2026-08-21 지정 — 지금 클러스터에서
+  노드가 떠 있는 유일한 GPU flavor)
 - 인프라팀이 `ResourceQuota`(`requests.nvidia.com/gpu: "1"`)를 적용 — 현재
   사용량과 정확히 같은 값으로 캡핑 (문서상 "예산의 70% 초과 시 즉시 제한"의
   종착점)
@@ -603,108 +660,143 @@ pod 자체가 생성조차 안 됨(`oc get pods`에 안 뜸) — 스케줄러가
 
 ---
 
-## 시나리오 8 — KServe + vLLM 유휴 시 자동 반납 (Scale-Down)
+## 시나리오 8 — KServe + vLLM 부하 기반 오토스케일링 (KEDA)
 
-> **상태: harness 반영 + 실측 검증 완료, 스케일다운은 정상 동작·스케일업은
-> 알려진 구조적 한계 확인 (2026-08-20).**
+> **상태: Red Hat 권고 패턴으로 재설계 + 실측 검증 완료 (2026-08-21).**
 
-**보여주는 것**: 실제 GPUaaS 플랫폼이라면 유휴 GPU를 사람이 지켜보다가
-지우는 게 아니라, **서빙 플랫폼 자체가 트래픽을 보고 자동으로 반납**한다.
-KServe로 vLLM 모델을 서빙하다가 요청이 안 오면 자동으로 replica가 0으로
-줄어서(GPU 완전 반납) 다른 팀이 쓸 수 있게 된다. (아래 실측에서 확인했듯,
-"요청이 오면 자동으로 다시 떠오른다"는 이 구성에서는 안 됨 — 그 이유와
-대안까지 정직하게 다룬다.)
+**보여주는 것**: KServe로 vLLM 모델을 서빙하면서, 실제 요청 부하(큐 depth)에
+따라 KEDA가 replica를 **1→2로 늘리고, 부하가 빠지면 다시 1로 줄이는** 걸
+직접 부하를 줘서 확인한다. 이전(2026-08-20) 버전은 `minReplicaCount: 0`으로
+설계했다가 "0에서 요청 오면 못 깨어난다"는 구조적 한계를 정직하게
+문서화하는 데 그쳤는데, 실제로 참고한 Red Hat 공식 문서 자체가
+`minReplicaCount: 1`을 쓰고 있어서(0이 아님) — 2026-08-21에 그 패턴 그대로
+재설계했다. `min=1`이면 항상 떠 있는 pod가 있어서 KEDA가 볼 메트릭이
+끊기지 않고, 그래서 애초에 "0에서 못 깨어나는" 문제 자체가 사라진다.
 
 **왜 Knative Serverless가 아니라 KEDA인가**: KServe의 scale-to-zero는
 원래 Knative(Serverless) 배포 모드의 기능인데, 이 클러스터의 RHOAI는
 Service Mesh 의존성을 피하려고 `remote/rhoai.sh`에서 일부러
-`RawDeployment` 모드로 설치돼 있다 (`defaultDeploymentMode: RawDeployment`,
-`serving.managementState: Removed`). RawDeployment는 원래 scale-to-zero를
-지원 안 하지만, Red Hat이 2025년 하반기에 공식 문서화한 방법이 있다 —
-**OpenShift Custom Metrics Autoscaler(KEDA 기반) 오퍼레이터**를 추가해서
-KServe의 기본 HPA를 끄고(`serving.kserve.io/autoscalerClass: external`)
-KEDA `ScaledObject`로 대체하면, Service Mesh/Knative 없이도
-`minReplicaCount: 0`까지 스케일다운된다.
+`RawDeployment` 모드로 설치돼 있다. RawDeployment는 원래 오토스케일을
+지원 안 하지만, **OpenShift Custom Metrics Autoscaler(KEDA 기반)
+오퍼레이터**로 KServe의 기본 HPA를 끄고(`serving.kserve.io/autoscalerClass:
+external`) KEDA `ScaledObject`로 대체하면 Service Mesh/Knative 없이도
+부하 기반 스케일이 가능하다. 진짜 0→1 wake-from-zero가 필요하면 그건
+Knative(Serverless) 모드의 몫 — [시나리오 9](#시나리오-9--kserve-serverlessknative--vllm-진짜-scale-to-zero)에서 다룬다.
 
 **구성**:
-- `openshift-custom-metrics-autoscaler-operator` 설치 (네임스페이스
-  `openshift-keda`, channel `stable`) + `KedaController` CR
-- RHOAI의 실제 vLLM `ServingRuntime`(`vllm-cuda-runtime`)으로
-  `Qwen/Qwen2.5-0.5B-Instruct` 서빙하는 `InferenceService`, `RawDeployment`
-  모드
-- `KEDA ScaledObject`(`minReplicaCount: 0`, `maxReplicaCount: 1` — GPU
-  1장뿐이라)가 Thanos Querier의 vLLM 큐 메트릭
-  (`vllm:num_requests_waiting`)을 트리거로 삼아 스케일
+- `KEDA ScaledObject`: `minReplicaCount: 1`, `maxReplicaCount: 2`,
+  `pollingInterval: 5`, `cooldownPeriod: 30` — Red Hat 아티클의
+  `pollingInterval`/threshold 값을 그대로 따름
+- 트리거: Thanos Querier의 `vllm:num_requests_waiting` (요청 큐 depth)
+- `--max-num-seqs=2`: vLLM이 동시에 처리할 시퀀스 수를 낮게 캡 — 이게
+  없으면 vLLM 기본값(256)이 어지간한 동시 요청은 큐잉 없이 다 받아버려서,
+  일부러 부하를 줘도 `num_requests_waiting`이 0에서 안 움직임(실측 확인)
+- GPU time-slicing 활성화(물리 GPU 1장을 2개 슬롯으로) — replica 2개가
+  진짜로 동시에 뜨려면 필요. 대가는 시나리오 5에서 겪은 것과 같은 DCGM
+  per-pod 그래프 오귀속 가능성(둘 다 동시에 안 뜨면 무관)
+- `--gpu-memory-utilization=0.4`, `--swap-space=1` (아래 메모리 사고 참고)
+
+**스케일 업/다운 트리거 조건 — GPU 사용률이 아니라 vLLM 자신의 요청 큐
+길이**:
+```yaml
+triggers:
+- type: prometheus
+  metadata:
+    query: sum(vllm:num_requests_waiting{namespace="..."}) or vector(0)
+    threshold: "1"
+  pollingInterval: 5   # 5초마다 체크
+```
+- vLLM이 자기 `/metrics` 엔드포인트에서 "지금 처리 못 하고 대기 중인 요청
+  수"(`vllm:num_requests_waiting`)를 직접 노출한다.
+- KEDA가 5초마다 이 값을 Thanos Querier로 읽어서 `threshold=1`을 넘으면
+  (대기 요청이 1개 초과) replica를 늘린다. 정확히는 HPA 공식대로
+  `desiredReplicas = ceil(현재replica × 현재값/threshold)`라서, 대기
+  요청이 많을수록 더 공격적으로 늘고 `maxReplicaCount=2`에서 캡된다.
+- 반대로 대기 요청이 0으로 떨어지고 그 상태가 `stabilizationWindowSeconds=30`
+  (아래 HPA 오버라이드) 동안 유지되면 줄어든다.
+- **왜 GPU 사용률이 아닌가**: 참고한 Red Hat 문서가 이 점을 명시적으로
+  다룬다 — LLM 서빙에서는 CPU/GPU 사용률 같은 전통적 지표가 스케일링
+  기준으로 부적합하다. 요청 1개만 들어와도 GPU는 반짝 100%를 찍을 수
+  있어서 "사용률이 높다"가 "replica를 더 늘려야 한다"는 뜻이 아니다.
+  반면 **큐에 쌓여서 못 처리하고 있는 요청 수**는 "지금 용량이 부족해서
+  지연이 생기고 있다"를 훨씬 직접적으로 보여주는 신호라서 이걸 쓴다.
+- `--max-num-seqs=2`는 스케일링 조건 자체는 아니고, 이 조건이 데모에서
+  실제로 발동하게 만드는 장치다 — 위에서 설명했듯 이게 없으면
+  `num_requests_waiting`이 계속 0으로 남아서 아무리 부하를 줘도
+  스케일업이 안 일어난다.
 
 **실행**:
 ```bash
 # 로컬에서
-./harness.sh scenario8-kserve-vllm-start      # InferenceService + KEDA ScaledObject 배포
-./harness.sh scenario8-kserve-vllm-load       # 실제 추론 요청 전송 (0이면 수동 스케일업 후 전송)
-./harness.sh scenario8-kserve-vllm-stop       # 정리
-
-# 또는 bastion에서 직접
-~/scenario8-kserve-vllm-start.sh
-~/scenario8-kserve-vllm-load.sh
-~/scenario8-kserve-vllm-stop.sh
+./harness.sh scenario8-kserve-vllm-start                         # InferenceService + KEDA ScaledObject 배포
+CONCURRENCY=8 DURATION=90 ./harness.sh scenario8-kserve-vllm-load # 동시 부하 발생 -> 1->2->1 확인
+./harness.sh scenario8-kserve-vllm-stop                           # 정리
 ```
 
-**실측하며 발견한 실제 문제들 (전부 스크립트에 해결/반영됨)**:
-1. **`storageUri: hf://...`가 기본적으로 안 됨** — RHOAI 2.25.8에
-   `ClusterStorageContainer`가 `hf://` 정규식을 등록해둔 게 하나도 없어서,
-   직접 만들어야 했다 (`hf-hub`, RHOAI 자체 `odh-kserve-storage-initializer-rhel9`
-   이미지 사용). 만들고 나니 실제로 HuggingFace에서 바로 다운로드됨
-   (모델 다운로드 **11초**).
-2. **T4에서 CUDA 그래프 캡처가 무한 행(hang)됨** — GPU 사용률 0%, 전력
-   27W(거의 유휴)로 3분 넘게 멈춰있는 걸 nvidia-smi로 직접 확인. vLLM 로그가
-   이미 힌트를 줬던 `--enforce-eager`로 해결(그래프 캡처 자체를 건너뜀) —
-   임시방편이 아니라 이 GPU에서는 영구적으로 필요.
-3. **기본 컨테이너 메모리 한도(8Gi)로 OOMKilled** — 모델 로딩까지는
-   성공하고 그 직후(exitCode 137, OOMKilled) 죽음. 12Gi로 올리니 해결.
-4. **GPU 1장뿐인 클러스터에서 롤링 업데이트가 데드락에 빠짐** — 위 2·3번을
-   고치려고 스펙을 바꿀 때마다, 옛 ReplicaSet의 pod가 GPU를 붙잡은 채
-   재시작을 반복하고 새 ReplicaSet의 pod는 GPU가 없어서 영원히 `Pending`.
-   `oc delete rs <old-replicaset>`로 옛것부터 강제로 치워야 새 pod가
-   스케줄됨 — GPU가 1장뿐인 환경의 반복 실측된 패턴.
+**실측하며 발견한 문제들 (전부 스크립트에 반영됨)**:
+1. **`storageUri: hf://...`가 기본적으로 안 됨** — `ClusterStorageContainer`
+   (`hf-hub`)를 직접 등록해야 함.
+2. **T4에서 CUDA 그래프 캡처가 무한 행** — `--enforce-eager`로 해결, 영구
+   필요.
+3. **predictor `Service`가 headless(`ClusterIP: None`)** — 포트 80→8080
+   매핑이 헤드리스라서 적용 안 됨. 부하 생성 pod가 Service DNS로 접속할 땐
+   반드시 **실제 컨테이너 포트(8080)를 직접** 써야 함(포트 80으로 쏘면
+   "Connection refused" — 부하가 아무리 세도 큐가 절대 안 쌓임, 처음엔
+   이것 때문에 부하 테스트가 계속 실패했다).
+4. **KServe RawDeployment는 `ServingRuntime`만 바꿔서는 재배포가 안 됨** —
+   `InferenceService`가 참조하는 `ServingRuntime`의 컨테이너 args를 바꿔도
+   실행 중인 `Deployment`의 pod template은 재렌더링되지 않는다(반복
+   확인). `oc delete deploy`로 강제로 지워야 KServe가 최신 스펙으로 다시
+   만든다 — 스크립트에 이 강제 삭제를 항상 넣어둠.
+5. **메모리 사고 (2026-08-21, 노드 크래시 2회)**: g4dn.xlarge(16GiB)에서
+   replica당 메모리 limit을 10Gi로 잡았더니, 2 replica 동시 운영 중
+   실제 사용량이 물리 메모리를 넘어서 **노드 kubelet이 응답을 멈췄다**
+   (`NotReady`, "Kubelet stopped posting node status") — EC2 재부팅으로
+   복구. 계정의 GPU 인스턴스 vCPU 쿼터가 4로 고정돼 있어서 g4dn.2xlarge
+   (8 vCPU, 32GiB)로 업그레이드도 실패(`InvalidConfiguration`, 계정
+   쿼터 초과) — 결국 g4dn.xlarge를 벗어날 수 없음. `oc adm top pod`로
+   실측해보니 idle 상태에서도 실제 사용량이 **8.65Gi**(0.5B 모델
+   가중치는 ~1GB뿐인데) — 범인은 vLLM 기본 `--swap-space`(CPU RAM에
+   4GiB를 KV캐시 스왑용으로 선점, `--gpu-memory-utilization`과는 무관한
+   별도 풀). **`--swap-space=1`** 하나로 실사용량이 **3.98Gi**로 급감 —
+   그제서야 memory limit을 6Gi/request 3Gi로 낮춰서 2×6Gi=12Gi가 16GiB
+   안에 안전하게 들어가게 됨.
+6. **`cooldownPeriod`만으로는 스케일다운이 안 빨라짐** — KEDA의
+   `cooldownPeriod: 30`을 설정해도, 그 아래 실제로 동작하는 K8s
+   `HorizontalPodAutoscaler`의 기본 `scaleDown.stabilizationWindowSeconds`
+   (300초, 5분)가 별도로 적용돼서 스케일다운이 실제로는 5~6분 걸렸다.
+   `ScaledObject.spec.advanced.horizontalPodAutoscalerConfig.behavior.
+   scaleDown.stabilizationWindowSeconds: 30`을 명시적으로 넣어야
+   `cooldownPeriod`가 실제로 뜻한 대로 동작함.
 
-**실측 결과**:
-- 콜드스타트(스케줄 → Ready): 모델 다운로드(11초) + vLLM eager 모드 로딩
-  포함 **약 75~90초**
-- 실제 추론 요청 확인: `"The capital of France is"` → `" Paris. It is the
-  most populous city in Europe"` (정상 응답)
-- KServe 자체 HPA는 실제로 안 만들어짐(`autoscalerClass: external` 확인) —
-  `keda-hpa-qwen-vllm-scaledobject`만 존재
-- **스케일다운(1→0)**: ScaledObject가 Ready 되자마자 **첫 평가에서 즉시**
-  트리거 비활성 감지 → deactivate (`KEDAScaleTargetDeactivated`) — 사실상
-  즉각적. 폴링 주기(15초)조차 기다릴 필요 없이 첫 reconcile에서 바로 일어남
-- **스케일업(0→1, 요청 감지 기반)**: **안 됨 — 확정.** Thanos에
-  `vllm:num_requests_waiting` 쿼리를 날려보면 replica가 0일 때
-  `"result":[]`(완전히 빈 결과, 0도 아니고 데이터 자체가 없음)가 나온다 —
-  pod가 없으면 그 메트릭을 낼 주체가 아예 없기 때문. KEDA는 요청 경로
-  밖에서 메트릭만 폴링하는 구조라, 이 메트릭으로는 "요청이 왔다"는 걸
-  구조적으로 감지할 수 없다.
-- **replica 0일 때 실제 요청을 보내면**: `curl`이 **DNS 조회 단계에서부터
-  실패**한다(`Could not resolve host`) — "connection refused"보다 더 앞
-  단계에서 막힌다. 이유: predictor `Service`가 headless(`ClusterIP: None`)
-  라서, 뒤에 pod(엔드포인트)가 하나도 없으면 DNS가 아예 레코드를 안
-  돌려준다.
+**최종 실측 결과** (2026-08-21, 모든 수정 반영 후):
+- `CONCURRENCY=8 DURATION=90`으로 부하 생성 → **약 10초 만에** 1→2
+  scale-out 시작, 두 replica 모두 Ready까지 약 70초
+- 부하 종료 후 **약 60초 만에** 2→1 scale-down 완료(수정 전엔 5~6분
+  걸렸던 것과 대비)
+- 두 replica 동시 운영 중 노드는 계속 `Ready` 유지, 메모리 사용량
+  실측 각 ~3.5~3.85Gi(6Gi limit 대비 여유 있음)
+- 콜드스타트(pod 생성 → Ready): 모델 다운로드 + vLLM eager 모드 로딩
+  포함 약 70~90초 (2026-08-20 최초 실측과 동일한 수준)
 
-**결론 — 레드햇 권고 관점**: 실제로 참고한 Red Hat 문서(KServe+KEDA
-아티클)의 예시조차 `minReplicaCount: 1`을 쓴다(0이 아님) — 즉 레드햇이
-이 조합(RawDeployment+KEDA)으로 공식 권장하는 건 **"이미 떠 있는 상태에서
-부하 따라 탄력적으로 늘고 주는 것"**이지, "0에서 요청 오면 깨어나는 것"은
-애초에 이 조합의 타겟이 아니다. 진짜 요청 기반 wake-from-zero는
-레드햇 기준으로도 **KServe Serverless(Knative) 모드가 공식 방법**이고,
-이건 우리가 Service Mesh를 피하려고 처음부터 포기한 바로 그 의존성이다.
-(대안으로 KEDA HTTP Add-on이라는 커뮤니티 프로젝트가 있어 Service Mesh
-없이 요청 기반 wake-up을 구현할 수 있지만, 레드햇 공식 지원 여부는
-확인되지 않음 — 필요시 다음 세션에서 검토.) 데모에서는 "스케일다운은
-완전 자동, 스케일업은 (현재 구성으로는) 수동/외부 트리거가 필요하다"는
-정직한 트레이드오프로 설명하는 걸 추천.
+**재현성 확인**: `scenario8-kserve-vllm-stop`으로 완전히 지운 뒤
+`scenario8-kserve-vllm-start`부터 다시 처음부터(수동 개입 없이 한 번에)
+배포 → 부하 테스트를 한 번 더 돌려서 동일하게 성공(scale-out ~10~20초,
+두 replica Ready까지 ~70초, scale-down ~60초~2분, 노드는 전 과정
+`Ready` 유지) — 특정 상태에서만 우연히 된 게 아니라 스크립트 자체가
+재현 가능함을 확인.
+
+**Grafana**: Tier1 "Scale-to-Zero Monitoring (Scenario 10)" 행에 이미
+"Scenario 8 (KEDA/RawDeployment) Replicas" 패널이 있음
+(`kube_deployment_status_replicas{namespace="gpu-kserve-scenario-8"}`),
+그 옆에 실제 KEDA 트리거 값인 `vllm:num_requests_waiting` 패널도 나란히
+배치 — 위 부하 테스트의 1→2→1 곡선과 큐 depth가 함께 그대로 보인다.
+
+![Scenario 8 결과: Tier1 대시보드에서 replica 수(1→2→1)와 vllm:num_requests_waiting 큐 depth가 함께 스케일링되는 모습](image/scenario8-result.png)
 
 Sources: [How to set up KServe autoscaling for vLLM with KEDA](https://developers.redhat.com/articles/2025/09/23/how-set-kserve-autoscaling-vllm-keda),
-[Custom Metrics Autoscaler on OpenShift](https://www.redhat.com/en/blog/custom-metrics-autoscaler-on-openshift),
-[Boost AI efficiency with GPU autoscaling on OpenShift](https://developers.redhat.com/articles/2025/08/12/boost-ai-efficiency-gpu-autoscaling-openshift)
+[Autoscaling vLLM with OpenShift AI model serving: Performance validation](https://developers.redhat.com/articles/2025/11/26/autoscaling-vllm-openshift-ai-model-serving),
+[Custom Metrics Autoscaler on OpenShift](https://www.redhat.com/en/blog/custom-metrics-autoscaler-on-openshift)
 
 ---
 
@@ -735,6 +827,75 @@ Serverless+Knative 모드로 배포해서, **진짜 요청 기반 0→1 자동 �
   annotation, `minReplicas: 0` (RawDeployment 대신) — 시나리오 8에서 이미
   확인된 값 재사용(`--enforce-eager`, 메모리 12Gi, 같은 모델). `ServingRuntime`은
   네임스페이스 스코프라 이 네임스페이스에도 별도로 생성 필요.
+
+**왜 Serverless에 Service Mesh가 필요한가**: Knative Serving 자체는
+Service Mesh 없이도 동작한다 — 기본 네트워킹 구현체는 가벼운 **Kourier**
+(`net-kourier`)라서 Istio 없이도 된다. 하지만 **RHOAI의 KServe Serverless
+모드는 다르다** — Red Hat이 공식 지원하는 아키텍처 자체가 Service Mesh와
+짝을 이루도록 돼 있다:
+- KServe가 InferenceService의 predictor/transformer/explainer 사이
+  트래픽 라우팅(카나리 배포 포함)을 Istio `VirtualService` 객체로
+  구현하기 때문에, Service Mesh 없이는 그 라우팅 계층 자체가 없다.
+- RHOAI의 `DSCInitialization`이 `ServiceMeshControlPlane`을 특정 이름/
+  네임스페이스로 하드코딩하고 있어서(위 참고), Service Mesh 오퍼레이터가
+  없으면 KServe가 Serverless 모드로 아예 `Ready`가 안 된다.
+
+그래서 [시나리오 8](#시나리오-8--kserve--vllm-부하-기반-오토스케일링-keda)은
+이 의존성을 **일부러 피하려고** RawDeployment+KEDA를 골랐고, 이 시나리오
+9는 반대로 "진짜 0→1 wake-from-zero"를 보여주려고 그 의존성을 받아들이고
+Service Mesh를 통째로 설치한다.
+
+**`knative-serving` 네임스페이스는 뭐하는 곳인가**: 특정 팀의 워크로드가
+아니라 **Knative Serving의 클러스터 전역 컨트롤 플레인**이 사는
+네임스페이스다 — "서버리스" 자체를 동작시키는 엔진룸. 핵심 컴포넌트:
+- **`activator`**: replica가 0일 때 요청을 큐에 붙잡아두고
+  `PodAutoscaler`에게 스케일업을 요청 (아래 요청 경로 참고)
+- **`autoscaler`**: 실제 오토스케일링 판단을 내리는 컨트롤러(KPA, Knative
+  Pod Autoscaler) — 요청 동시성/RPS를 보고 pod 수를 계산
+- **`controller`**: Knative의 핵심 리컨실 루프 — `Service`/`Configuration`/
+  `Revision`/`Route` CRD를 감시하다가 실제 Kubernetes `Deployment`/
+  `Service`를 만들고 관리
+- **`webhook`**: Knative 리소스 admission webhook(검증/기본값 주입)
+- **`net-istio-controller`**: Knative의 라우팅 의도를 실제 네트워킹
+  구현체(여기선 net-istio라 Istio `VirtualService`)로 번역
+
+정리하면 `gpu-kserve-scenario-9`는 **테넌트의 실제 모델 pod**가 뜨는
+곳이고, `knative-serving`은 **그 pod를 언제 띄우고 내릴지, 요청을 어디로
+라우팅할지 결정하는 클러스터 전체의 두뇌**다. `ServiceMeshMemberRoll`에
+이 둘을 같이 등록해야 했던 것도, "두뇌"(activator 등)와 "실제 pod" 둘 다
+mesh 안에서 서로 통신해야 하기 때문이다.
+
+**요청이 들어오면 실제로 어떻게 스케일되는가 (요청 경로)**:
+```
+외부 요청
+  → Istio ingress gateway (Service Mesh)
+  → Knative Activator          <- 0 replica일 때 요청을 여기서 큐잉/버퍼링
+  → (필요하면) predictor pod 새로 스케줄
+  → predictor pod의 queue-proxy 사이드카
+  → 실제 vLLM 컨테이너
+```
+- **0 replica일 때**: Knative의 net-istio가 만든 라우팅 규칙 덕분에 요청이
+  실제 pod가 아니라 먼저 **Activator**로 간다. Activator가 "지금 pod가
+  없다"는 걸 감지하면, `PodAutoscaler`(KPA)에게 스케일업을 요청하고, 새
+  pod가 뜰 때까지 그 요청을 **큐에 들고 대기**시킨다 — 요청이 끊기거나
+  실패하는 게 아니라 진짜로 붙잡고 기다린다(단, 서빙 경로의 타임아웃보다
+  콜드스타트가 오래 걸리면 위 실측처럼 그 안에서 끊길 수 있음).
+- pod가 Ready 되면 Activator가 큐에 있던 요청을 그 pod로 그대로
+  전달한다 — 클라이언트 입장에서는 응답이 늦게 온 것처럼 보일 뿐, 재요청이
+  필요 없다(콜드스타트가 서빙 경로 타임아웃 안에 끝난다는 전제 하에).
+- **1개 이상 replica가 이미 떠 있을 때**: KPA가 판단해서 트래픽을
+  Activator를 거치지 않고 pod로 직접 붙일 수도 있다(revision의
+  `containerConcurrency`/트래픽 패턴에 따라) — 이게 warm 요청이 0.3~0.5초로
+  빠른 이유.
+- **스케일다운**: 요청이 더 안 오는 상태가 일정 시간(안정화 윈도우 +
+  scale-to-zero grace period, `knative-serving` 네임스페이스의
+  `config-autoscaler` ConfigMap에 설정) 지속되면 KPA가 replica를 다시
+  0으로 내린다.
+- 시나리오 8(KEDA)과의 근본적 차이는 바로 이 **Activator의 존재**다 —
+  KEDA는 요청 경로 밖에서 메트릭만 폴링하는 구조라 "요청이 왔다"를 직접
+  감지도, 큐잉도 못 하지만, Knative는 Activator가 요청 경로 **안에**
+  있어서 요청 자체가 스케일업의 트리거이자 그 요청을 붙잡아두는 버퍼
+  역할을 동시에 한다.
 
 **실제로 부딪힌 문제들 (전부 이 랩 클러스터가 작아서/처음 설치라서 생긴 것)**:
 1. Knative의 HA 컨트롤플레인(activator 등 replica=2 기본값)이 뜰 자리가
@@ -814,17 +975,36 @@ replica로 idle한 상태에서, 각각 실제로 무엇이 관측 가능한지 
    단, `oc patch --type=merge`로 빈 객체 `{}`를 주면 기존 matchLabels가
    안 지워진다(머지 패치는 삭제를 표현 못 함) — `--type=json`으로
    `replace`해야 실제로 적용됨
-3. kube-state-metrics는 자기 자신(kube-rbac-proxy 사이드카)의 `namespace`
-   라벨과 실제로 관측 중인 워크로드의 `namespace` 라벨이 충돌하는데,
-   `honorLabels: true`를 줘도 이 경우엔 충돌 라벨이 `exported_namespace`로
-   밀려남(DCGM 때와 증상은 비슷하지만 완전히 같지는 않음) — 실전 쿼리는
-   `namespace`가 아니라 **`exported_namespace`** 라벨을 써야 함
+3. ~~kube-state-metrics의 `namespace` 라벨이 충돌해서 `exported_namespace`를
+   써야 한다~~ — **정정 (2026-08-21)**: DCGM 익스포터 때와 헷갈려서 잘못
+   적었던 내용. 실제로 Grafana 프록시로 직접 쿼리해서 확인해보니
+   `kube_deployment_status_replicas`는 그런 라벨 충돌이 없고, `namespace`
+   라벨을 써야 데이터가 나온다(`exported_namespace`로는 빈 결과만 나옴,
+   시나리오 8 재설계 중 대시보드에 데이터가 안 보인다는 걸로 실제로 걸림).
+   Tier1 대시보드 쿼리도 `namespace`로 고쳐서 재적용함
 
 **모니터링 레이어 (실제 구현)**:
 1. **시간에 따른 replica 수** — Grafana Tier1 대시보드에 새 row
    "Scale-to-Zero Monitoring (Scenario 10)" 추가, 두 패널:
-   `kube_deployment_status_replicas{exported_namespace="gpu-kserve-scenario-8", deployment="qwen-vllm-predictor"}` (KEDA)와
-   `kube_deployment_status_replicas{exported_namespace="gpu-kserve-scenario-9", deployment=~"qwen-vllm-serverless-predictor.*"}` (Knative) — pod 존재 여부와 무관하게 항상 조회 가능
+   시나리오 8(KEDA)은 `kube_deployment_status_replicas{namespace="gpu-kserve-scenario-8",
+   deployment="qwen-vllm-predictor"}` — RawDeployment는 Deployment가 하나뿐이라
+   이걸로 충분함.
+   시나리오 9(Knative)는 **Deployment 기준이 아니라 pod 기준**으로 바꿈
+   (**정정, 2026-08-21**): 처음엔 똑같이
+   `kube_deployment_status_replicas{namespace="gpu-kserve-scenario-9",
+   deployment=~"qwen-vllm-serverless-predictor.*"}`를 썼는데, 실측 요청을
+   보내서 pod가 실제로 3/3 Running인 상태에서 직접 쿼리해보니
+   `.status.replicas` 필드 자체가 거의 비어있어서 계속 0/데이터없음만
+   나왔다 — Knative가 관리하는 revision Deployment는 `.status`를
+   신뢰성 있게 안 채운다는 뜻. 게다가 Knative는 revision마다(재배포 때마다)
+   **새 Deployment 오브젝트**를 만들어서(`...-00001-deployment`,
+   `...-00002-deployment`...), 정규식 매칭으로는 옛 revision의 영구
+   flat-0 라인이 계속 쌓여서 그래프가 지저분해진다. 최종 쿼리:
+   `sum(kube_pod_status_ready{namespace="gpu-kserve-scenario-9",
+   pod=~"qwen-vllm-serverless-predictor.*", condition="true"}) or vector(0)`
+   — pod 기준이라 정확하고, `sum()`으로 여러 revision을 합쳐서 한 줄로
+   보여주고, `or vector(0)`로 idle일 때도 그래프에 구멍 없이 명확히 0으로
+   나온다.
 2. **콜드스타트 갭을 정직하게 보여주기** — `~/scenario10-scalezero-monitor-demo.sh`가
    두 시나리오에 각각 실제 요청을 보내서 실측:
    - KEDA(시나리오 8): `Could not resolve host` — DNS 단계에서부터 그냥 실패

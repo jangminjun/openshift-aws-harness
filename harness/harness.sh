@@ -42,11 +42,13 @@
 #   scenario6-preempt-start                                                 low-priority bad-code-workload occupies the only GPU
 #   scenario6-preempt-trigger                                                 normal-priority pod preempts it
 #   scenario6-preempt-stop                                                      delete both pods, restore MachineAutoscaler max
+#   (scenario6-preempt-* also works as-is for scenario 6-1 in the docs: just pass
+#    INSTANCE_TYPE for a flavor whose MachineAutoscaler is already at max==current)
 #   scenario7-chargeback-start                                                    team-workload-1 (1 GPU) + ResourceQuota capping the namespace at it
 #   scenario7-chargeback-trigger                                                    attempt a second GPU pod -> rejected at admission time
 #   scenario7-chargeback-stop                                                         delete pods + ResourceQuota
-#   scenario8-kserve-vllm-start                                                           deploy Qwen2.5-0.5B via KServe+vLLM, KEDA ScaledObject (min=0,max=1)
-#   scenario8-kserve-vllm-load                                                              send a real completion request (scales up from 0 if needed)
+#   scenario8-kserve-vllm-start                                                           deploy Qwen2.5-0.5B via KServe+vLLM, KEDA ScaledObject (min=1,max=2)
+#   scenario8-kserve-vllm-load                                                              sustained concurrent load (CONCURRENCY/DURATION) -> real 1->2->1 scaling
 #   scenario8-kserve-vllm-stop                                                                delete the InferenceService/ServingRuntime/KEDA objects
 #   scenario9-serverless-start                                                          install Serverless+ServiceMesh, deploy Qwen2.5-0.5B via KServe Serverless (minReplicas=0, PVC-cached model)
 #   scenario9-serverless-load                                                            send a real completion request (real 0->1 wake-from-zero if idle)
@@ -389,22 +391,22 @@ cmd_scenario5_badcode_stop() {
 }
 
 cmd_scenario6_preempt_start() {
-  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-preempt-scenario-6}' INSTANCE_TYPE='${INSTANCE_TYPE:-g5.2xlarge}' bash -s" \
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-preempt-scenario-6}' INSTANCE_TYPE='${INSTANCE_TYPE:-g4dn.xlarge}' bash -s" \
     < ./remote/scenario6-preempt-start.sh
 }
 
 cmd_scenario6_preempt_trigger() {
-  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-preempt-scenario-6}' INSTANCE_TYPE='${INSTANCE_TYPE:-g5.2xlarge}' bash -s" \
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-preempt-scenario-6}' INSTANCE_TYPE='${INSTANCE_TYPE:-g4dn.xlarge}' bash -s" \
     < ./remote/scenario6-preempt-trigger.sh
 }
 
 cmd_scenario6_preempt_stop() {
-  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-preempt-scenario-6}' INSTANCE_TYPE='${INSTANCE_TYPE:-g5.2xlarge}' RESTORE_MAX='${RESTORE_MAX:-2}' bash -s" \
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-preempt-scenario-6}' INSTANCE_TYPE='${INSTANCE_TYPE:-g4dn.xlarge}' RESTORE_MAX='${RESTORE_MAX:-1}' bash -s" \
     < ./remote/scenario6-preempt-stop.sh
 }
 
 cmd_scenario7_chargeback_start() {
-  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-chargeback-scenario-7}' GPU_QUOTA='${GPU_QUOTA:-1}' bash -s" \
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-chargeback-scenario-7}' GPU_QUOTA='${GPU_QUOTA:-1}' INSTANCE_TYPE='${INSTANCE_TYPE:-g4dn.xlarge}' bash -s" \
     < ./remote/scenario7-chargeback-start.sh
 }
 
@@ -424,7 +426,7 @@ cmd_scenario8_kserve_vllm_start() {
 }
 
 cmd_scenario8_kserve_vllm_load() {
-  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-kserve-scenario-8}' bash -s" \
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-kserve-scenario-8}' CONCURRENCY='${CONCURRENCY:-8}' DURATION='${DURATION:-90}' bash -s" \
     < ./remote/scenario8-kserve-vllm-load.sh
 }
 

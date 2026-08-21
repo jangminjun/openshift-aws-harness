@@ -522,7 +522,16 @@ Low, immediate preemption target under resource pressure) is Scenario 6.
 
 ## Scenario 6 — PriorityClass Downgrade and Preemption in Practice
 
-> **Status: fully wired into the harness + measurement-validated (2026-08-14).**
+> **Status: fully wired into the harness + measurement-validated (2026-08-14,
+> default switched to g4dn.xlarge and re-validated on 2026-08-21).**
+
+> **Note**: `INSTANCE_TYPE` used to default to `g5.2xlarge`; switched to
+> `g4dn.xlarge` on 2026-08-21 because the live cluster no longer has a
+> `MachineAutoscaler` for g5.2xlarge (scaled to 0/0), so the old default
+> failed outright. The default now works the same way [Scenario 6-1](#scenario-6-1--preemption-when-the-gpu-node-count-is-pinned-at-1)
+> does (reusing a flavor already pinned at 1 node). To run against
+> g5.2xlarge, recreate its `MachineAutoscaler` (min=1, max=2) first and
+> override `INSTANCE_TYPE=g5.2xlarge`.
 
 **What it shows**: say the infra team downgraded a team's PriorityClass to
 Low after Scenario 5 flagged it — does that actually do anything? The moment
@@ -531,30 +540,32 @@ team's pod and hands the GPU to a normal-priority workload. Reproduces the
 doc's "PriorityClass downgraded to Low → immediate preemption target under
 resource pressure" directly.
 
-**Core design — removing the race with the autoscaler**: `bad-code-workload`
-and `legitimate-workload` are both pinned to the same GPU flavor
-(g5.2xlarge, 1 node / 1 GPU) so that capacity is genuinely contested — but
-left alone, `MachineAutoscaler` could just add a second node and resolve it
-without any preemption at all (a race condition). To remove that,
-`scenario6-preempt-start.sh` temporarily **caps g5's MachineAutoscaler `max`
-at its current replica count (1)**, ruling out scale-out entirely so
+**Core design — removing the race with the autoscaler**:
+`low-priority-workload` and `high-priority-workload` are both pinned to the
+same GPU flavor (1 node / 1 GPU) so that capacity is genuinely contested —
+but left alone, `MachineAutoscaler` could just add a second node and resolve
+it without any preemption at all (a race condition). To remove that,
+`scenario6-preempt-start.sh` temporarily **caps that MachineAutoscaler's
+`max` at its current replica count (1)**, ruling out scale-out entirely so
 preemption is the only path forward. `scenario6-preempt-stop.sh` restores it
-to 2.
+afterward. (Pod names were renamed from `bad-code-workload`/
+`legitimate-workload` to `low-priority-workload`/`high-priority-workload` on
+2026-08-21, to avoid clashing with Scenario 5's own `bad-code-workload`.)
 
 **Setup**:
 - `PriorityClass/low-priority-team` (value: -1000000) — the "assigned to the
   team flagged in Scenario 5" concept
-- `bad-code-workload`: `priorityClassName: low-priority-team`, pinned to
-  g5.2xlarge, requests 1 GPU — occupies the only GPU
-- `legitimate-workload`: default priority (no PriorityClass set, default
-  value 0 > -1000000), also pinned to g5.2xlarge, requests 1 GPU
+- `low-priority-workload`: `priorityClassName: low-priority-team`, pinned to
+  the target flavor, requests 1 GPU — occupies the only GPU
+- `high-priority-workload`: default priority (no PriorityClass set, default
+  value 0 > -1000000), also pinned to the target flavor, requests 1 GPU
 
 **Run**:
 ```bash
-# locally
-./harness.sh scenario6-preempt-start      # bad-code-workload takes the GPU at low priority
-./harness.sh scenario6-preempt-trigger    # deploy legitimate-workload -> confirm preemption
-./harness.sh scenario6-preempt-stop       # cleanup + restore MachineAutoscaler max (2)
+# locally (defaults to g4dn.xlarge)
+./harness.sh scenario6-preempt-start      # low-priority-workload takes the GPU at low priority
+./harness.sh scenario6-preempt-trigger    # deploy high-priority-workload -> confirm preemption
+./harness.sh scenario6-preempt-stop       # cleanup + restore MachineAutoscaler max (1)
 ```
 
 **Watch**:
@@ -563,20 +574,64 @@ oc get pods -n gpu-preempt-scenario-6 -w
 oc get events -n gpu-preempt-scenario-6 --field-selector reason=Preempted
 ```
 
-**Measured result** (2026-08-14): with `bad-code-workload` `Running` on g5's
-only GPU at `low-priority-team` priority, deploying `legitimate-workload`
-(default priority) produced this event **about 34 seconds later**:
+**Measured result** (2026-08-21, `INSTANCE_TYPE=g4dn.xlarge`): with the
+low-priority pod `Running` on the only GPU at `low-priority-team` priority,
+deploying the normal-priority pod produced this event **about 33 seconds
+later** (measured before the rename, so the pod names in the event log
+still read `bad-code-workload`/the trigger pod -- behavior is identical):
 ```
-Normal   Preempted   pod/bad-code-workload   Preempted by pod 9a6d9af0-... on node ip-10-0-1-245.ec2.internal
+Normal   Preempted   pod/bad-code-workload   Preempted by pod 5a42ffd4-... on node ip-10-0-30-108.ec2.internal
 ```
-`bad-code-workload` was evicted (`Gone`), and `legitimate-workload` took over
-the GPU as `Running`. The explicit "Preempted by pod ..." event is the
-evidence this was a real preemption, not a coincidental restart.
+The low-priority pod was evicted (`Gone`), and the normal-priority pod took
+over the GPU as `Running`. The explicit "Preempted by pod ..." event is the
+evidence this was a real preemption, not a coincidental restart. (For
+reference: the original 2026-08-14 run used g5.2xlarge and took about 34
+seconds — effectively the same result.)
 
 **Cleanup**: `scenario6-preempt-stop.sh` handles both pod deletion and
-restoring the MachineAutoscaler max (2) in one call — even stopping mid-
-trigger, this one script returns the cluster to its normal state (min=1/
-max=2 on each flavor).
+restoring the MachineAutoscaler max in one call — even stopping mid-trigger,
+this one script returns the cluster to its normal state.
+
+---
+
+## Scenario 6-1 — Preemption When the GPU Node Count Is Pinned at 1
+
+> **Status: measurement-validated (2026-08-21).**
+
+**Applies whenever**: a GPU flavor has no scale-out headroom at all —
+whether its `MachineAutoscaler` is already at `min=max=1`, or no
+`MachineAutoscaler` exists for it. No new script is needed: reuse Scenario
+6's scripts directly against that flavor. Since there's already no headroom,
+`scenario6-preempt-start.sh`'s "cap max at current replicas" patch is a
+no-op, and there's no need to wait for a new node to boot.
+
+**Run**: Scenario 6's `INSTANCE_TYPE` now defaults to `g4dn.xlarge`, so this
+demo is effectively Scenario 6 run with its default — set below just to keep
+the namespace distinct:
+```bash
+# locally
+INSTANCE_TYPE=g4dn.xlarge DEMO_NAMESPACE=gpu-preempt-scenario-6-1 ./harness.sh scenario6-preempt-start
+INSTANCE_TYPE=g4dn.xlarge DEMO_NAMESPACE=gpu-preempt-scenario-6-1 ./harness.sh scenario6-preempt-trigger
+INSTANCE_TYPE=g4dn.xlarge DEMO_NAMESPACE=gpu-preempt-scenario-6-1 ./harness.sh scenario6-preempt-stop
+```
+
+**Watch**:
+```bash
+oc get pods -n gpu-preempt-scenario-6-1 -w
+oc get events -n gpu-preempt-scenario-6-1 --field-selector reason=Preempted
+```
+
+**Measured result** (2026-08-21, `INSTANCE_TYPE=g4dn.xlarge`, reusing the
+node that was already up at 1/1 -- `low-priority-workload` went `Running`
+immediately, no boot wait): deploying `high-priority-workload` produced a
+confirmed preemption event **about 33 seconds later** (measured before the
+rename, so the event log below still shows the old pod names):
+```
+Normal   Preempted   pod/bad-code-workload   Preempted by pod 5a42ffd4-... on node ip-10-0-30-108.ec2.internal
+```
+Same outcome as Scenario 6 -- whether the MachineAutoscaler was freshly
+capped, already pinned, or doesn't exist at all, zero scale-out headroom
+reliably means Preemption fires.
 
 ---
 
@@ -600,7 +655,8 @@ match to the actual AWS bill.
 
 **Setup**:
 - `team-workload-1`: requests 1 GPU, deployed (stands in for the team's
-  "already in use" footprint)
+  "already in use" footprint). `INSTANCE_TYPE` defaults to `g4dn.xlarge`
+  (set 2026-08-21 -- the only GPU flavor with a node currently up)
 - Infra team applies a `ResourceQuota` (`requests.nvidia.com/gpu: "1"`) —
   capped at exactly the current usage (the endpoint of the doc's "immediately
   cap it once the budget hits 70%" response)
@@ -637,111 +693,156 @@ standing one up is a separate MachineSet exercise out of scope here.
 
 ---
 
-## Scenario 8 — KServe + vLLM Scale-Down on Idle
+## Scenario 8 — KServe + vLLM Load-Based Autoscaling (KEDA)
 
-> **Status: wired into the harness + measurement-validated. Scale-down
-> works correctly; scale-up has a confirmed structural limitation
-> (2026-08-20).**
+> **Status: redesigned to Red Hat's recommended pattern + measurement-validated (2026-08-21).**
 
-**What it shows**: in a real GPUaaS platform, an idle GPU shouldn't need a
-human (or a script) watching it and deleting things — **the serving
-platform itself should give it back automatically based on real traffic**.
-Serving a vLLM model through KServe, replicas scale to 0 (full GPU release)
-automatically once requests stop. (As measured below, "scales back up
-automatically the moment a new request arrives" does **not** hold for this
-particular setup — the honest reason, and the alternative, are covered too.)
+**What it shows**: serving a vLLM model through KServe, KEDA scales replicas
+**1→2 under real request load, and back down to 1** once load stops —
+driven by real, sustained concurrent traffic, not a single request. The
+earlier (2026-08-20) version used `minReplicaCount: 0` and ended up mostly
+documenting a structural "can't wake from zero" limitation honestly. The
+actual Red Hat article this is based on uses `minReplicaCount: 1` in its own
+example (not 0) — so on 2026-08-21 this was redesigned to match that
+pattern exactly. With `min=1` there's always a pod running, so KEDA's metric
+never goes missing, and the "can't wake from zero" problem doesn't arise in
+the first place.
 
 **Why KEDA instead of Knative Serverless**: KServe's scale-to-zero is
 normally a feature of its Knative (Serverless) deployment mode, but this
-cluster's RHOAI is deliberately installed in `RawDeployment` mode in
-`remote/rhoai.sh` specifically to avoid a Service Mesh dependency
-(`defaultDeploymentMode: RawDeployment`, `serving.managementState: Removed`).
-RawDeployment doesn't support scale-to-zero on its own — but Red Hat
-documented an officially-supported way to get it anyway in late 2025: add the
-**OpenShift Custom Metrics Autoscaler (KEDA-based) operator**, disable
-KServe's built-in HPA (`serving.kserve.io/autoscalerClass: external`), and
-replace it with a KEDA `ScaledObject` that supports `minReplicaCount: 0`.
+cluster's RHOAI is deliberately installed in `RawDeployment` mode to avoid a
+Service Mesh dependency. RawDeployment doesn't support autoscaling on its
+own — the **OpenShift Custom Metrics Autoscaler (KEDA-based) operator**
+disables KServe's built-in HPA (`serving.kserve.io/autoscalerClass:
+external`) and replaces it with a KEDA `ScaledObject` for load-based
+scaling, no Service Mesh needed. Genuine 0→1 wake-from-zero is Knative's
+job — see [Scenario 9](#scenario-9--kserve-serverless-knative--vllm-real-scale-to-zero).
 
 **Setup**:
-- `openshift-custom-metrics-autoscaler-operator` (namespace `openshift-keda`,
-  channel `stable`) + a `KedaController` CR
-- An `InferenceService` serving `Qwen/Qwen2.5-0.5B-Instruct` through RHOAI's
-  actual vLLM `ServingRuntime` (`vllm-cuda-runtime`), `RawDeployment` mode
-- A `KEDA ScaledObject` (`minReplicaCount: 0`, `maxReplicaCount: 1` — only
-  one GPU exists) triggered on the Thanos Querier vLLM queue metric
-  (`vllm:num_requests_waiting`)
+- `KEDA ScaledObject`: `minReplicaCount: 1`, `maxReplicaCount: 2`,
+  `pollingInterval: 5`, `cooldownPeriod: 30` — matching the Red Hat
+  article's pollingInterval/threshold values
+- Trigger: Thanos Querier's `vllm:num_requests_waiting` (queue depth)
+- `--max-num-seqs=2`: caps how many sequences vLLM runs concurrently —
+  without it, vLLM's default (256) absorbs a handful of concurrent demo
+  clients with `num_requests_waiting` staying at 0 no matter how much load
+  is thrown at it (confirmed live)
+- GPU time-slicing enabled (1 physical GPU as 2 schedulable units) — needed
+  for 2 replicas to actually run concurrently. Trade-off: same DCGM
+  per-pod misattribution risk as Scenario 5, only if both happen to run at
+  the same instant
+- `--gpu-memory-utilization=0.4`, `--swap-space=1` (see the memory incident
+  below)
+
+**What actually triggers scale up/down — vLLM's own request queue, not GPU
+utilization**:
+```yaml
+triggers:
+- type: prometheus
+  metadata:
+    query: sum(vllm:num_requests_waiting{namespace="..."}) or vector(0)
+    threshold: "1"
+  pollingInterval: 5   # checked every 5 seconds
+```
+- vLLM exposes "requests currently waiting, unable to be processed yet"
+  (`vllm:num_requests_waiting`) directly from its own `/metrics` endpoint.
+- KEDA reads this via Thanos Querier every 5 seconds; once it crosses
+  `threshold: 1` (more than 1 request waiting), it scales up. Precisely,
+  the underlying HPA formula is
+  `desiredReplicas = ceil(currentReplicas * currentValue / threshold)`, so
+  a bigger backlog scales more aggressively, capped at `maxReplicaCount: 2`.
+- Scaling back down requires the value to drop back to 0 and stay there for
+  `stabilizationWindowSeconds: 30` (the HPA override below).
+- **Why not GPU utilization**: the Red Hat article this is based on
+  addresses this directly — traditional metrics like CPU/GPU utilization
+  aren't a good scaling signal for LLM serving. A single request can spike
+  GPU to 100% without meaning more replicas are needed. Queue depth (how
+  many requests are stuck waiting) is a far more direct signal that
+  capacity is actually falling behind demand.
+- `--max-num-seqs=2` isn't the trigger condition itself — it's what makes
+  that condition reachable in a demo at all. Without it,
+  `num_requests_waiting` stays at 0 regardless of how much load is thrown
+  at the service, as explained above.
 
 **Run**:
 ```bash
 # locally
-./harness.sh scenario8-kserve-vllm-start      # deploy InferenceService + KEDA ScaledObject
-./harness.sh scenario8-kserve-vllm-load       # send a real inference request (manually scales up from 0 if needed)
-./harness.sh scenario8-kserve-vllm-stop       # cleanup
-
-# or directly on the bastion
-~/scenario8-kserve-vllm-start.sh
-~/scenario8-kserve-vllm-load.sh
-~/scenario8-kserve-vllm-stop.sh
+./harness.sh scenario8-kserve-vllm-start                          # deploy InferenceService + KEDA ScaledObject
+CONCURRENCY=8 DURATION=90 ./harness.sh scenario8-kserve-vllm-load  # generate concurrent load -> confirm 1->2->1
+./harness.sh scenario8-kserve-vllm-stop                            # cleanup
 ```
 
 **Real problems hit while building this (all fixed, encoded in the scripts)**:
-1. **`storageUri: hf://...` doesn't work out of the box** — RHOAI 2.25.8
-   ships no `ClusterStorageContainer` registering the `hf://` regex, so one
-   had to be created (`hf-hub`, using RHOAI's own
-   `odh-kserve-storage-initializer-rhel9` image). Once added, it genuinely
-   pulled from Hugging Face (model download: **11 seconds**).
-2. **CUDA graph capture hangs forever on this T4** — confirmed via
-   `nvidia-smi`: 0% GPU utilization, 27W (near-idle) power draw, stuck for
-   3+ minutes at a fixed capture step. `--enforce-eager` (skips graph
-   capture) fixes it — not a one-time workaround, this needs to stay on
-   permanently for this GPU.
-3. **Default 8Gi container memory limit gets OOMKilled** — the process dies
-   (exit 137, OOMKilled) right after model load finishes. Raising it to 12Gi
-   fixed it.
-4. **A rolling update deadlocks on a single-GPU cluster** — every time #2/#3
-   above required a spec change, the old ReplicaSet's pod kept holding the
-   only GPU and crash-looping while the new ReplicaSet's pod sat `Pending`
-   forever with nowhere to schedule. `oc delete rs <old-replicaset>` to
-   force it out is required — a pattern that repeated every single time.
+1. **`storageUri: hf://...` doesn't work out of the box** — needed a
+   `ClusterStorageContainer` (`hf-hub`) registered manually.
+2. **CUDA graph capture hangs forever on this T4** — fixed with
+   `--enforce-eager`, needs to stay on permanently.
+3. **The predictor `Service` is headless (`ClusterIP: None`)** — its port
+   80→8080 mapping doesn't apply for headless Services. A load-generator
+   pod hitting the Service by DNS must use the **real container port
+   (8080) directly** — hitting port 80 gets "Connection refused" and the
+   queue never builds no matter how much load runs (this is what made the
+   load test silently fail for a while before the root cause was found).
+4. **KServe RawDeployment doesn't re-render from a ServingRuntime-only
+   change** — editing the container args on the `ServingRuntime` an
+   `InferenceService` references does NOT trigger the running `Deployment`
+   to pick up the change (confirmed repeatedly). `oc delete deploy` forces
+   KServe to recreate it from the current spec — now baked into the script
+   unconditionally.
+5. **Memory incident (2026-08-21, two node crashes)**: at a 10Gi per-replica
+   memory limit on g4dn.xlarge (16GiB), running 2 replicas concurrently
+   pushed real usage past physical RAM and the node's **kubelet stopped
+   responding** (`NotReady`, "Kubelet stopped posting node status") --
+   required an EC2 reboot to recover, twice. Tried upgrading to
+   g4dn.2xlarge (32GiB) instead, but this sandbox account's vCPU quota for
+   the "G and VT instances" bucket is a hard 4, and g4dn.2xlarge needs 8 --
+   launch failed (`InvalidConfiguration`), reverted to g4dn.xlarge. `oc adm
+   top pod` showed real usage of **8.65Gi at idle** for a single replica —
+   far more than the ~1GB the 0.5B model's weights account for. Root cause:
+   vLLM's default `--swap-space` reserves 4GiB of CPU RAM per instance for
+   CPU-side KV-cache swap, unrelated to `--gpu-memory-utilization` (a
+   separate, GPU-VRAM-only pool). **`--swap-space=1` alone dropped real
+   usage to 3.98Gi** -- only then was it safe to lower the memory limit to
+   6Gi/3Gi (request), so 2x6Gi=12Gi fits comfortably inside 16GiB.
+6. **`cooldownPeriod` alone didn't make scale-down fast** — the underlying
+   native `HorizontalPodAutoscaler`'s own default
+   `scaleDown.stabilizationWindowSeconds` (300s, 5 minutes) applies on top
+   of KEDA's `cooldownPeriod`, so scale-down actually took 5-6 minutes
+   despite `cooldownPeriod: 30`. Fixed by explicitly setting
+   `ScaledObject.spec.advanced.horizontalPodAutoscalerConfig.behavior.
+   scaleDown.stabilizationWindowSeconds: 30`.
 
-**Measured results**:
-- Cold start (scheduled → Ready): model download (11s) + vLLM eager-mode
-  load, **~75-90 seconds total**
-- Real inference confirmed: `"The capital of France is"` → `" Paris. It is
-  the most populous city in Europe"` (correct, coherent completion)
-- KServe's own HPA is genuinely absent (`autoscalerClass: external`
-  confirmed working) — only `keda-hpa-qwen-vllm-scaledobject` exists
-- **Scale-down (1→0)**: near-instantaneous — KEDA deactivated the target on
-  its very first reconcile after the ScaledObject became Ready
-  (`KEDAScaleTargetDeactivated`), without even waiting a full polling
-  interval (15s)
-- **Scale-up (0→1, on request) — confirmed NOT working**: querying Thanos
-  for `vllm:num_requests_waiting` while at 0 replicas returns `"result":[]`
-  — a completely empty result, not even a zero — because there's no pod to
-  emit that metric in the first place. KEDA polls metrics from outside the
-  request path, so it has no way to observe an incoming request when
-  nothing is running to report on it.
-- **A real request at 0 replicas**: `curl` fails at **DNS resolution**
-  (`Could not resolve host`), a step earlier than "connection refused" —
-  because the predictor `Service` is headless (`ClusterIP: None`), and DNS
-  returns no records at all once it has zero backing endpoints.
+**Final measured results** (2026-08-21, all fixes applied):
+- `CONCURRENCY=8 DURATION=90` load generated a real 1→2 scale-out starting
+  **~10 seconds** after load began; both replicas reached Ready within
+  ~70 seconds
+- Scale-down (2→1) completed **~60 seconds** after load stopped (vs. 5-6
+  minutes before the stabilization-window fix)
+- The node stayed `Ready` throughout, with real per-pod memory measured at
+  ~3.5-3.85Gi each (comfortable headroom under the 6Gi limit)
+- Cold start (pod created → Ready): ~70-90 seconds including model download
+  and vLLM eager-mode load (consistent with the original 2026-08-20 finding)
 
-**Conclusion — what Red Hat actually recommends**: even the Red Hat article
-this was built from uses `minReplicaCount: 1` in its own example (not 0) —
-meaning Red Hat's own documented guidance for RawDeployment+KEDA targets
-**elastic scaling among already-warm replicas under load**, not genuine
-wake-from-zero. True request-triggered scale-from-zero is, by Red Hat's own
-architecture, a **KServe Serverless (Knative)** feature — precisely the
-dependency this whole design avoided to sidestep Service Mesh. (The KEDA
-HTTP Add-on is a community project that can add request-based wake-up
-without full Service Mesh, but Red Hat's official support for it wasn't
-confirmed — worth evaluating in a future session.) For the demo: present
-scale-down as fully automatic and scale-up as currently requiring a
-manual/external trigger — an honest tradeoff, not a bug.
+**Reproducibility check**: fully torn down with `scenario8-kserve-vllm-stop`,
+then redeployed from scratch with `scenario8-kserve-vllm-start` (no manual
+intervention needed this time) and load-tested again -- same result
+(scale-out in ~10-20s, both replicas Ready by ~70s, scale-down in
+~60s-2min, node stayed `Ready` throughout). Confirms this isn't a one-off
+that only worked in a specific leftover cluster state -- the scripts
+themselves are reproducible.
+
+**Grafana**: Tier1's "Scale-to-Zero Monitoring (Scenario 10)" row already
+has a "Scenario 8 (KEDA/RawDeployment) Replicas" panel
+(`kube_deployment_status_replicas{namespace="gpu-kserve-scenario-8"}`),
+paired right next to it with the actual KEDA trigger value,
+`vllm:num_requests_waiting` -- the 1→2→1 curve from the load test above and
+the queue depth driving it show up together directly.
+
+![Scenario 8 result: Tier1 dashboard showing replica count (1→2→1) scaling together with the vllm:num_requests_waiting queue depth](image/scenario8-result.png)
 
 Sources: [How to set up KServe autoscaling for vLLM with KEDA](https://developers.redhat.com/articles/2025/09/23/how-set-kserve-autoscaling-vllm-keda),
-[Custom Metrics Autoscaler on OpenShift](https://www.redhat.com/en/blog/custom-metrics-autoscaler-on-openshift),
-[Boost AI efficiency with GPU autoscaling on OpenShift](https://developers.redhat.com/articles/2025/08/12/boost-ai-efficiency-gpu-autoscaling-openshift)
+[Autoscaling vLLM with OpenShift AI model serving: Performance validation](https://developers.redhat.com/articles/2025/11/26/autoscaling-vllm-openshift-ai-model-serving),
+[Custom Metrics Autoscaler on OpenShift](https://www.redhat.com/en/blog/custom-metrics-autoscaler-on-openshift)
 
 ---
 
@@ -774,6 +875,85 @@ KServe's scale-to-zero was originally designed around.
   already confirmed in Scenario 8 (`--enforce-eager`, 12Gi memory, same
   model). `ServingRuntime` is namespace-scoped, so it needed its own copy in
   this namespace too.
+
+**Why Serverless needs Service Mesh**: Knative Serving itself doesn't
+require Service Mesh — its default networking implementation is the
+lightweight **Kourier** (`net-kourier`), which works without Istio at all.
+**RHOAI's KServe Serverless mode is different**, though — Red Hat's
+officially supported architecture pairs it with Service Mesh by design:
+- KServe implements traffic routing between an InferenceService's
+  predictor/transformer/explainer (including canary rollouts) as Istio
+  `VirtualService` objects -- without Service Mesh, that routing layer
+  simply doesn't exist.
+- RHOAI's `DSCInitialization` hardcodes the `ServiceMeshControlPlane` to a
+  specific name/namespace (noted above); without the Service Mesh operator,
+  KServe never reaches `Ready` in Serverless mode at all.
+
+This is exactly why [Scenario 8](#scenario-8--kserve--vllm-load-based-autoscaling-keda)
+deliberately chose RawDeployment+KEDA to avoid this dependency, while this
+scenario accepts it and installs Service Mesh in full to demonstrate real
+0→1 wake-from-zero.
+
+**What does the `knative-serving` namespace actually do**: it's not tenant
+workload space at all -- it's where **Knative Serving's cluster-wide
+control plane** lives, the engine room that makes "serverless" actually
+work. The key components in it:
+- **`activator`**: holds requests in a queue while a revision is at 0
+  replicas and asks the `PodAutoscaler` to scale up (see the request path
+  below)
+- **`autoscaler`**: the controller that makes the actual autoscaling
+  decision (KPA, Knative Pod Autoscaler) -- watches request
+  concurrency/RPS and computes how many pods a revision needs
+- **`controller`**: Knative's core reconcile loop -- watches the
+  `Service`/`Configuration`/`Revision`/`Route` CRDs and creates/manages the
+  real underlying Kubernetes `Deployment`/`Service` objects
+- **`webhook`**: the admission webhook for Knative resources (validation,
+  defaulting)
+- **`net-istio-controller`**: translates Knative's routing intent into the
+  actual networking implementation (here, Istio `VirtualService` objects,
+  since this cluster uses net-istio)
+
+Put together: `gpu-kserve-scenario-9` is where the **tenant's actual model
+pod** runs, and `knative-serving` is the **cluster-wide brain deciding
+when that pod should exist and where requests get routed**. That's also
+exactly why both had to be registered in the `ServiceMeshMemberRoll` --
+both the "brain" (activator etc.) and the actual pod need to talk to each
+other inside the mesh.
+
+**What actually happens on the wire when a request arrives (the request path)**:
+```
+external request
+  → Istio ingress gateway (Service Mesh)
+  → Knative Activator          <- queues/buffers the request while at 0 replicas
+  → (if needed) a new predictor pod gets scheduled
+  → the predictor pod's queue-proxy sidecar
+  → the actual vLLM container
+```
+- **At 0 replicas**: thanks to the routing rules Knative's net-istio sets
+  up, the request goes to the **Activator** first, not to a pod (there is
+  no pod yet). The Activator detects there's no pod, asks the
+  `PodAutoscaler` (KPA) to scale up, and **holds the request in a queue**
+  until a pod is ready -- it doesn't drop or fail the request, it genuinely
+  waits (though if cold start takes longer than the serving path's own
+  timeout, it can still get cut off there, as measured above).
+- Once the pod is Ready, the Activator forwards the queued request straight
+  to it -- from the client's perspective the response just arrives late; no
+  retry needed, as long as cold start finishes inside the serving path's
+  timeout.
+- **Once 1+ replicas are already running**: KPA can route traffic directly
+  to the pod, bypassing the Activator (depending on the revision's
+  `containerConcurrency` and traffic pattern) -- this is why warm requests
+  are fast (0.3-0.5s).
+- **Scaling back down**: once no requests arrive for a sustained period
+  (stable window + scale-to-zero grace period, both configured in the
+  `config-autoscaler` ConfigMap in the `knative-serving` namespace), KPA
+  scales the revision back to 0.
+- The fundamental difference from Scenario 8 (KEDA) is this **Activator
+  sitting in the request path**. KEDA polls metrics from outside the
+  request path entirely, so it can neither observe an incoming request nor
+  buffer one. Knative's Activator does both at once -- the request itself
+  is both the trigger for scale-up and the thing being held until capacity
+  exists.
 
 **Real problems hit (all a function of this being a small, first-time
 Knative-on-Service-Mesh install)**:
@@ -865,18 +1045,36 @@ broken from the start. Two causes:
    **not** clear existing matchLabels (merge patches can't express
    deletion) — needed `--type=json` with a `replace` op to actually take
    effect.
-3. kube-state-metrics' own `namespace` label (its kube-rbac-proxy sidecar's
-   identity) collides with the workload's real `namespace` label; even with
-   `honorLabels: true` the conflicting label gets pushed to
-   **`exported_namespace`** instead of being overwritten cleanly (similar
-   symptom to the DCGM case, but not identical) — real queries need to
-   filter on `exported_namespace`, not `namespace`.
+3. ~~kube-state-metrics' `namespace` label collides, so queries need
+   `exported_namespace`~~ — **Correction (2026-08-21)**: this was wrong,
+   confused with the DCGM exporter case. Queried directly through
+   Grafana's own datasource proxy while chasing a "no data" report on this
+   panel and confirmed `kube_deployment_status_replicas` has no such label
+   collision at all -- `namespace` is the correct label (`exported_namespace`
+   returns an empty result). Fixed the Tier1 dashboard query and
+   reapplied.
 
 **Monitoring layers (as actually built)**:
 1. **Replica count over time** — new "Scale-to-Zero Monitoring (Scenario
    10)" row on the Tier1 Grafana dashboard, two panels:
-   `kube_deployment_status_replicas{exported_namespace="gpu-kserve-scenario-8", deployment="qwen-vllm-predictor"}` (KEDA) and
-   `kube_deployment_status_replicas{exported_namespace="gpu-kserve-scenario-9", deployment=~"qwen-vllm-serverless-predictor.*"}` (Knative) — works whether or not a pod currently exists.
+   Scenario 8 (KEDA) uses `kube_deployment_status_replicas{namespace="gpu-kserve-scenario-8", deployment="qwen-vllm-predictor"}` --
+   RawDeployment only ever has one Deployment object, so this is sufficient.
+   Scenario 9 (Knative) uses a **pod-based query instead of a
+   Deployment-based one** (**correction, 2026-08-21**): it originally used
+   the same pattern,
+   `kube_deployment_status_replicas{namespace="gpu-kserve-scenario-9", deployment=~"qwen-vllm-serverless-predictor.*"}`,
+   but after sending a real request and confirming the pod was genuinely
+   3/3 Running, the panel kept reading 0/no-data -- querying directly
+   showed the Deployment's `.status.replicas` field was essentially empty.
+   Knative-managed revision Deployments don't reliably populate `.status`.
+   On top of that, Knative creates a **new Deployment object per revision**
+   on every redeploy (`...-00001-deployment`, `...-00002-deployment`, ...),
+   so a regex match accumulates permanently-flatlined-at-0 lines from old
+   revisions, cluttering the graph. Final query:
+   `sum(kube_pod_status_ready{namespace="gpu-kserve-scenario-9", pod=~"qwen-vllm-serverless-predictor.*", condition="true"}) or vector(0)`
+   -- pod-based so it's accurate, `sum()` collapses multiple revisions into
+   one line, and `or vector(0)` guarantees an explicit 0 while idle instead
+   of a gap.
 2. **The cold-start gap, shown honestly** —
    `~/scenario10-scalezero-monitor-demo.sh` sends a real request to each,
    measured live:

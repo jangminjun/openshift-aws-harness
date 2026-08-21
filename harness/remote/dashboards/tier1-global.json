@@ -416,8 +416,29 @@
       },
       "targets": [
         {
-          "expr": "kube_deployment_status_replicas{exported_namespace=\"gpu-kserve-scenario-8\", deployment=\"qwen-vllm-predictor\"}",
+          "expr": "kube_deployment_status_replicas{namespace=\"gpu-kserve-scenario-8\", deployment=\"qwen-vllm-predictor\"}",
           "legendFormat": "replicas",
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "title": "Scenario 8 KEDA Trigger -- vllm:num_requests_waiting",
+      "type": "timeseries",
+      "datasource": "${DS_THANOS}",
+      "description": "The actual metric KEDA polls to decide scale up/down for scenario 8 -- crossing threshold=1 triggers a scale-out, dropping back to 0 (and staying there for stabilizationWindowSeconds) triggers scale-down. Not GPU utilization -- see the SCENARIOS doc for why.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 61 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        }
+      },
+      "targets": [
+        {
+          "expr": "vllm:num_requests_waiting{namespace=\"gpu-kserve-scenario-8\"}",
+          "legendFormat": "{{pod}}",
           "datasource": "${DS_THANOS}"
         }
       ]
@@ -427,7 +448,7 @@
       "title": "Scenario 9 (Knative Serverless) Replicas -- qwen-vllm-serverless-predictor",
       "type": "timeseries",
       "datasource": "${DS_THANOS}",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 61 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 69 },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -435,10 +456,11 @@
           "max": 2
         }
       },
+      "description": "Pod-based, not Deployment-based (confirmed live 2026-08-21: Knative's revision Deployments don't reliably populate .status.replicas -- a real pod was 3/3 Running while kube_deployment_status_replicas still read 0/empty). Also sums across Knative's per-revision Deployments (qwen-vllm-serverless-predictor-NNNNN-deployment, a new one per revision) so old revisions don't leave permanently-flatlined-at-0 series cluttering the graph. `or vector(0)` guarantees an explicit 0 while idle instead of a gap.",
       "targets": [
         {
-          "expr": "kube_deployment_status_replicas{exported_namespace=\"gpu-kserve-scenario-9\", deployment=~\"qwen-vllm-serverless-predictor.*\"}",
-          "legendFormat": "{{deployment}}",
+          "expr": "sum(kube_pod_status_ready{namespace=\"gpu-kserve-scenario-9\", pod=~\"qwen-vllm-serverless-predictor.*\", condition=\"true\"}) or vector(0)",
+          "legendFormat": "replicas",
           "datasource": "${DS_THANOS}"
         }
       ]

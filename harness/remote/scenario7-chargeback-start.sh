@@ -5,11 +5,16 @@
 # just responded to a budget-overrun alert by locking the team to its
 # current footprint. No visible effect yet; scenario7-chargeback-trigger.sh
 # is where the team tries to exceed it. Idempotent.
+#
+# Defaults to g4dn.xlarge (2026-08-21), the only GPU flavor with a running
+# node right now -- g5.2xlarge/g6.2xlarge are both scaled to 0/0 on the live
+# cluster (see scenario 6's caveat in the SCENARIOS docs).
 set -euo pipefail
 export KUBECONFIG="$HOME/ocp-install/auth/kubeconfig"
 
 DEMO_NAMESPACE="${DEMO_NAMESPACE:-gpu-chargeback-scenario-7}"
 GPU_QUOTA="${GPU_QUOTA:-1}"
+INSTANCE_TYPE="${INSTANCE_TYPE:-g4dn.xlarge}"
 
 oc apply -f - <<YAML
 apiVersion: v1
@@ -28,6 +33,8 @@ metadata:
     app: team-workload-1
 spec:
   restartPolicy: Never
+  nodeSelector:
+    node.kubernetes.io/instance-type: ${INSTANCE_TYPE}
   tolerations:
   - key: nvidia.com/gpu
     operator: Exists
