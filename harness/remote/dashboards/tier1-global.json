@@ -394,6 +394,54 @@
           "datasource": "${DS_THANOS}"
         }
       ]
+    },
+    {
+      "id": 106,
+      "title": "Scale-to-Zero Monitoring (Scenario 10) -- KEDA vs Knative",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 60 }
+    },
+    {
+      "id": 20,
+      "title": "Scenario 8 (KEDA/RawDeployment) Replicas -- qwen-vllm-predictor",
+      "type": "timeseries",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 61 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 2
+        }
+      },
+      "targets": [
+        {
+          "expr": "kube_deployment_status_replicas{exported_namespace=\"gpu-kserve-scenario-8\", deployment=\"qwen-vllm-predictor\"}",
+          "legendFormat": "replicas",
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "title": "Scenario 9 (Knative Serverless) Replicas -- qwen-vllm-serverless-predictor",
+      "type": "timeseries",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 61 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 2
+        }
+      },
+      "targets": [
+        {
+          "expr": "kube_deployment_status_replicas{exported_namespace=\"gpu-kserve-scenario-9\", deployment=~\"qwen-vllm-serverless-predictor.*\"}",
+          "legendFormat": "{{deployment}}",
+          "datasource": "${DS_THANOS}"
+        }
+      ]
     }
   ],
   "schemaVersion": 39,

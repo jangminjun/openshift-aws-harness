@@ -35,8 +35,10 @@
 #   scenario4-fault-start                                         deploy fault-workload (Deployment) on a GPU node
 #   scenario4-fault-trigger                                         cordon+drain its node, watch it reschedule elsewhere
 #   scenario4-fault-stop                                              delete the deployment, uncordon GPU nodes
-#   scenario5-badcode-start                                             bad-code-workload (num_workers=0) vs efficient-workload (num_workers=4)
-#   scenario5-badcode-stop                                                delete both comparison pods
+#   scenario5-badcode-start                                             bad-code-workload alone (num_workers=0, matmul x10), 3min observe
+#   scenario5-efficient-start                                             efficient-workload alone (num_workers=4, matmul x10), 3min observe -- run after badcode
+#   scenario5-more-efficient-start                                        same as efficient but matmul x60 -- also fixes the GPU_UTIL graph itself
+#   scenario5-badcode-stop                                                delete all three comparison pods (safety net)
 #   scenario6-preempt-start                                                 low-priority bad-code-workload occupies the only GPU
 #   scenario6-preempt-trigger                                                 normal-priority pod preempts it
 #   scenario6-preempt-stop                                                      delete both pods, restore MachineAutoscaler max
@@ -46,9 +48,10 @@
 #   scenario8-kserve-vllm-start                                                           deploy Qwen2.5-0.5B via KServe+vLLM, KEDA ScaledObject (min=0,max=1)
 #   scenario8-kserve-vllm-load                                                              send a real completion request (scales up from 0 if needed)
 #   scenario8-kserve-vllm-stop                                                                delete the InferenceService/ServingRuntime/KEDA objects
-#   scenario9-dynamic-reclaim-start                                                                anchor pod + dynamic pod -> MachineAutoscaler scale-out
-#   scenario9-dynamic-reclaim-trigger                                                                samples dynamic pod's utilization -> reclaims if idle
-#   scenario9-dynamic-reclaim-stop                                                                    delete both pods, reset MachineSet to 1 replica
+#   scenario9-serverless-start                                                          install Serverless+ServiceMesh, deploy Qwen2.5-0.5B via KServe Serverless (minReplicas=0, PVC-cached model)
+#   scenario9-serverless-load                                                            send a real completion request (real 0->1 wake-from-zero if idle)
+#   scenario9-serverless-stop                                                              delete the InferenceService/ServingRuntime/PVC/namespace
+#   scenario10-scalezero-monitor-demo                                          KEDA vs Knative side-by-side: request both at 0 replicas, compare
 #   push-scenario-scripts                     copy scenario1-4 convenience scripts to ~/ on the bastion
 #   all                                    full sequence: cluster+admin-user+g5/g6 GPU+RHOAI+monitoring+logging, end to end
 #   destroy-cluster                          openshift-install destroy cluster
@@ -362,8 +365,22 @@ cmd_scenario4_fault_stop() {
 cmd_scenario5_badcode_start() {
   ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-badcode-scenario-5}' \
     PER_SAMPLE_SLEEP='${PER_SAMPLE_SLEEP:-0.2}' BATCH_SIZE='${BATCH_SIZE:-32}' \
-    GOOD_NUM_WORKERS='${GOOD_NUM_WORKERS:-4}' bash -s" \
+    OBSERVE_SECONDS='${OBSERVE_SECONDS:-180}' bash -s" \
     < ./remote/scenario5-badcode-start.sh
+}
+
+cmd_scenario5_efficient_start() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-badcode-scenario-5}' \
+    PER_SAMPLE_SLEEP='${PER_SAMPLE_SLEEP:-0.2}' BATCH_SIZE='${BATCH_SIZE:-32}' \
+    NUM_WORKERS='${NUM_WORKERS:-4}' OBSERVE_SECONDS='${OBSERVE_SECONDS:-180}' bash -s" \
+    < ./remote/scenario5-efficient-start.sh
+}
+
+cmd_scenario5_more_efficient_start() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-badcode-scenario-5}' \
+    PER_SAMPLE_SLEEP='${PER_SAMPLE_SLEEP:-0.2}' BATCH_SIZE='${BATCH_SIZE:-32}' \
+    NUM_WORKERS='${NUM_WORKERS:-4}' OBSERVE_SECONDS='${OBSERVE_SECONDS:-180}' bash -s" \
+    < ./remote/scenario5-more-efficient-start.sh
 }
 
 cmd_scenario5_badcode_stop() {
@@ -416,19 +433,29 @@ cmd_scenario8_kserve_vllm_stop() {
     < ./remote/scenario8-kserve-vllm-stop.sh
 }
 
-cmd_scenario9_dynamic_reclaim_start() {
-  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-dynamic-scenario-9}' INSTANCE_TYPE='${INSTANCE_TYPE:-g5.2xlarge}' bash -s" \
-    < ./remote/scenario9-dynamic-reclaim-start.sh
+cmd_scenario9_serverless_start() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-kserve-scenario-9}' INSTANCE_TYPE='${INSTANCE_TYPE:-g4dn.xlarge}' bash -s" \
+    < ./remote/scenario9-serverless-start.sh
 }
 
-cmd_scenario9_dynamic_reclaim_trigger() {
-  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-dynamic-scenario-9}' INSTANCE_TYPE='${INSTANCE_TYPE:-g5.2xlarge}' IDLE_THRESHOLD_PCT='${IDLE_THRESHOLD_PCT:-3}' bash -s" \
-    < ./remote/scenario9-dynamic-reclaim-trigger.sh
+cmd_scenario9_serverless_load() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-kserve-scenario-9}' bash -s" \
+    < ./remote/scenario9-serverless-load.sh
 }
 
-cmd_scenario9_dynamic_reclaim_stop() {
-  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-dynamic-scenario-9}' INSTANCE_TYPE='${INSTANCE_TYPE:-g5.2xlarge}' bash -s" \
-    < ./remote/scenario9-dynamic-reclaim-stop.sh
+cmd_scenario9_serverless_stop() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-gpu-kserve-scenario-9}' bash -s" \
+    < ./remote/scenario9-serverless-stop.sh
+}
+
+cmd_scenario10_scalezero_monitor_demo() {
+  ssh_bastion "NS8='${NS8:-gpu-kserve-scenario-8}' NS9='${NS9:-gpu-kserve-scenario-9}' bash -s" \
+    < ./remote/scenario10-scalezero-monitor-demo.sh
+}
+
+cmd_scenario10_logging_continuity_demo() {
+  ssh_bastion "NS9='${NS9:-gpu-kserve-scenario-9}' LOGGING_NAMESPACE='${LOGGING_NAMESPACE:-openshift-logging}' bash -s" \
+    < ./remote/scenario10-logging-continuity-demo.sh
 }
 
 # Copies standalone convenience copies of the scenario scripts onto the
@@ -450,6 +477,8 @@ cmd_push_scenario_scripts() {
     "scenario4-fault-trigger.sh:scenario4-fault-trigger.sh"
     "scenario4-fault-stop.sh:scenario4-fault-stop.sh"
     "scenario5-badcode-start.sh:scenario5-badcode-start.sh"
+    "scenario5-efficient-start.sh:scenario5-efficient-start.sh"
+    "scenario5-more-efficient-start.sh:scenario5-more-efficient-start.sh"
     "scenario5-badcode-stop.sh:scenario5-badcode-stop.sh"
     "scenario6-preempt-start.sh:scenario6-preempt-start.sh"
     "scenario6-preempt-trigger.sh:scenario6-preempt-trigger.sh"
@@ -460,9 +489,11 @@ cmd_push_scenario_scripts() {
     "scenario8-kserve-vllm-start.sh:scenario8-kserve-vllm-start.sh"
     "scenario8-kserve-vllm-load.sh:scenario8-kserve-vllm-load.sh"
     "scenario8-kserve-vllm-stop.sh:scenario8-kserve-vllm-stop.sh"
-    "scenario9-dynamic-reclaim-start.sh:scenario9-dynamic-reclaim-start.sh"
-    "scenario9-dynamic-reclaim-trigger.sh:scenario9-dynamic-reclaim-trigger.sh"
-    "scenario9-dynamic-reclaim-stop.sh:scenario9-dynamic-reclaim-stop.sh"
+    "scenario9-serverless-start.sh:scenario9-serverless-start.sh"
+    "scenario9-serverless-load.sh:scenario9-serverless-load.sh"
+    "scenario9-serverless-stop.sh:scenario9-serverless-stop.sh"
+    "scenario10-scalezero-monitor-demo.sh:scenario10-scalezero-monitor-demo.sh"
+    "scenario10-logging-continuity-demo.sh:scenario10-logging-continuity-demo.sh"
   )
   local pair src dst
   for pair in "${pairs[@]}"; do
@@ -553,6 +584,8 @@ case "$cmd" in
   scenario4-fault-trigger)                                        cmd_scenario4_fault_trigger ;;
   scenario4-fault-stop)                                             cmd_scenario4_fault_stop ;;
   scenario5-badcode-start)                                            cmd_scenario5_badcode_start ;;
+  scenario5-efficient-start)                                            cmd_scenario5_efficient_start ;;
+  scenario5-more-efficient-start)                                       cmd_scenario5_more_efficient_start ;;
   scenario5-badcode-stop)                                               cmd_scenario5_badcode_stop ;;
   scenario6-preempt-start)                                                cmd_scenario6_preempt_start ;;
   scenario6-preempt-trigger)                                                cmd_scenario6_preempt_trigger ;;
@@ -563,9 +596,11 @@ case "$cmd" in
   scenario8-kserve-vllm-start)                                                          cmd_scenario8_kserve_vllm_start ;;
   scenario8-kserve-vllm-load)                                                             cmd_scenario8_kserve_vllm_load ;;
   scenario8-kserve-vllm-stop)                                                               cmd_scenario8_kserve_vllm_stop ;;
-  scenario9-dynamic-reclaim-start)                                                              cmd_scenario9_dynamic_reclaim_start ;;
-  scenario9-dynamic-reclaim-trigger)                                                              cmd_scenario9_dynamic_reclaim_trigger ;;
-  scenario9-dynamic-reclaim-stop)                                                                 cmd_scenario9_dynamic_reclaim_stop ;;
+  scenario9-serverless-start)                                                           cmd_scenario9_serverless_start ;;
+  scenario9-serverless-load)                                                              cmd_scenario9_serverless_load ;;
+  scenario9-serverless-stop)                                                               cmd_scenario9_serverless_stop ;;
+  scenario10-scalezero-monitor-demo)                                        cmd_scenario10_scalezero_monitor_demo ;;
+  scenario10-logging-continuity-demo)                                        cmd_scenario10_logging_continuity_demo ;;
   push-scenario-scripts)               cmd_push_scenario_scripts ;;
   destroy-cluster)                     cmd_destroy_cluster ;;
   destroy-bastion)                      cmd_destroy_bastion "$@" ;;

@@ -311,11 +311,23 @@ uncordon을 같이 처리하므로, 트리거 도중에 중단하더라도 이 �
 
 ## 시나리오 5 — 비효율 코드 탐지 (Bad Code Penalty)
 
-> **상태: harness 반영 + 실측 검증 완료 (2026-08-14, 이후 2026-08-20에 순차
-> 실행 방식으로 재작성 — 새 AWS 샌드박스 계정의 G/VT vCPU 쿼터가 4라서
-> GPU 노드를 동시에 1대만 띄울 수 있어, 원래의 "두 pod 동시 실행 후 비교"
-> 방식이 그대로는 안 됨. 아래 실측 결과는 이전(2대 동시 가능했던) 계정
-> 기준이고, 순차 실행 버전의 재검증은 아직 전).**
+> **상태: harness 반영 + 실측 검증 완료. 2026-08-20에 순차 실행 →
+> 2026-08-21 오전에 GPU time-slicing으로 동시 실행 재검증 →
+> 2026-08-21 오후에 **다시 순차 실행으로 최종 확정**. 이유: time-slicing
+> 상태에서 두 pod가 동시에 GPU를 쓰니 Grafana의 per-pod 패널(Stall
+> Pattern)에서 선이 끊겨 보이는 문제가 발생 — 원인을 파고들어 보니, DCGM이
+> 물리 GPU 하나에 대해 리포트하는 `DCGM_FI_DEV_GPU_UTIL` 등은 **디바이스
+> 단위 메트릭이지 프로세스별 메트릭이 아니라서**, time-slicing으로 여러
+> pod가 같은 물리 GPU를 번갈아 점유할 때 DCGM/exporter가 그 순간 "누구
+> 것인지" 라벨을 하나로만 확정할 수 있고, 그마저도 스크레이프마다 다른
+> pod로 튈 수 있음(실측: 두 pod가 동시에 `Running`인데 시리즈가 1개만
+> 잡히고, 라벨 우선순위도 기대와 다르게 나옴) — 즉 이건 이 프로젝트의
+> 설정 실수가 아니라 **time-slicing(격리 없이 연산 사이클만 멀티플렉싱)
+> 자체의 근본적인 관측성 한계**다. 그래서 GPU 노드는 다시 순수하게 1개
+> pod가 전체 점유하도록 되돌리고(time-slicing 끔,
+> `ClusterPolicy.spec.devicePlugin.config` 제거), **`bad-code`와
+> `efficient`를 완전히 독립된 스크립트로 분리**해서 각각 3분씩 순차
+> 실행하는 방식으로 최종 확정했다.**
 > PriorityClass 하향 + Preemption 실효성 증명은 [시나리오 6](#시나리오-6--priorityclass-하향-및-preemption-실효성-증명)에서 이어짐.
 
 **보여주는 것**: 똑같은 학습 코드인데 `DataLoader`의 `num_workers` 설정
@@ -343,40 +355,140 @@ PyTorch 메커니즘으로 재현한다 (인위적인 `sleep`으로 흉내내는
   크래시한다 — pod에 `emptyDir(medium: Memory, sizeLimit: 1Gi)`를
   `/dev/shm`에 마운트해서 해결함 (2026-08-14 실측으로 발견/수정)
 
-**실행 (순차 버전, GPU 노드 1대 기준)**: `scenario5-badcode-start` 하나가
-`bad-code-workload`를 배포 → `OBSERVE_SECONDS`(기본 60초) 관찰 → step 수
-기록 → 삭제 → 곧바로 `efficient-workload` 배포 → 같은 시간 관찰 → 삭제 →
-마지막에 두 결과를 나란히 출력한다 (GPU 1장이라 동시 실행이 안 되니, 같은
-시간 동안 각각 따로 재서 비교).
+**학습 코드 간단 설명**:
+```python
+step = 0
+w = torch.rand((4096, 4096), device="cuda")
+for batch in loader:                  # DataLoader가 배치를 하나씩 내어줌
+    x = batch.to("cuda")
+    for _ in range(10):
+        y = torch.matmul(w, w)        # GPU 연산 (모든 배치에 동일하게 적용)
+    torch.cuda.synchronize()
+    step += 1
+    if step % 5 == 0:
+        print(f"step={step}", flush=True)   # 5스텝마다 진행 상황을 로그로 출력
+```
+`num_workers=0`이면 이 `for batch in loader:`가 매 배치마다 메인
+프로세스에서 직접 0.2초×32개(≈6.4초)를 순차로 기다린 뒤에야 다음 줄로
+넘어간다. `num_workers=4`면 별도 워커 프로세스들이 GPU가 `matmul`을 도는
+동안 백그라운드에서 다음 배치를 미리 준비해두기 때문에, 메인 루프는
+거의 기다리지 않고 바로바로 다음 배치를 받는다 — 두 workload의 코드
+차이는 딱 이 `num_workers` 값 하나뿐이다.
+
+**처리량("step 수")은 이렇게 구한다**:
+```bash
+oc logs "$1" -n "${DEMO_NAMESPACE}" 2>/dev/null | grep -oE 'step=[0-9]+' | tail -1 | cut -d= -f2
+```
+`OBSERVE_SECONDS` 동안 재운 뒤, 해당 pod의 로그에서 `step=N` 패턴을 전부
+찾아 **가장 마지막 줄의 숫자**를 뽑아낸다. 즉 "처리량"은 "**같은 시간
+동안 배치(32개 샘플)를 몇 번 다 처리했는가**"이고, 이게 GPU가 놀지 않고
+얼마나 실제로 일했는지를 보여주는 대리 지표다. 두 workload가 완전히
+같은 연산량(같은 matmul 10회)을 돌리기 때문에, step 수 차이는 순전히
+"다음 배치를 얼마나 빨리 GPU에 넣어줄 수 있었는가" — 즉 DataLoader
+병목 여부만 반영한다.
+
+**실행 (순차 실행, 완전히 분리된 두 스크립트)**: `bad-code-workload`와
+`efficient-workload`가 각각 독립된 스크립트로 나뉘어 있다 — 순서대로
+실행하면 GPU를 하나씩 온전히 점유한 상태에서 각각 `OBSERVE_SECONDS`(기본
+180초, 3분) 동안 관찰하고 결과를 출력한다.
 ```bash
 # 로컬에서
-./harness.sh scenario5-badcode-start      # 두 워크로드를 순차로 돌리고 처리량 비교까지 자동 출력
-./harness.sh scenario5-badcode-stop       # 안전망 (start가 이미 각 단계에서 정리함)
+./harness.sh scenario5-badcode-start      # bad-code-workload만 배포, 3분 관찰 후 결과 출력 및 정리
+./harness.sh scenario5-efficient-start    # 이어서 efficient-workload만 배포, 3분 관찰 후 결과 출력 및 정리
+./harness.sh scenario5-badcode-stop       # 안전망 (start가 각자 마지막에 정리함)
 
-# 관찰 시간 조정
+# 관찰 시간 조정 (기본 180초/각각)
 OBSERVE_SECONDS=120 ./harness.sh scenario5-badcode-start
+OBSERVE_SECONDS=120 ./harness.sh scenario5-efficient-start
 ```
 
 **지켜볼 것**:
-- `scenario5-badcode-start` 자체 출력 — 각 워크로드가 같은 시간 동안 몇
-  step까지 갔는지, 배율(speedup)까지 마지막에 계산해서 보여줌
-- Grafana Tier1 "GPU Compute vs Memory Utilization (Cluster Avg)" / Tier2
-  "Stall Pattern: High Memory, Low Compute" 패널 — 두 구간의 이용률 차이를
-  시간순으로 확인 가능
+- 각 스크립트 자체 출력 — 해당 워크로드가 관찰 시간 동안 몇 step까지
+  갔는지
+- Grafana Tier1 "GPU Compute vs Memory Utilization (Cluster Avg)" — 클러스터
+  전체 평균, 두 실행 구간이 시간축에서 이어져서 보인다(동시는 아니지만
+  순서대로 뚜렷하게 대비됨)
+- Grafana Tier2 "GPU Utilization per Pod" / "GPU Memory Used per Pod" —
+  같은 row에 나란히 배치돼 있어 pod별 컴퓨트·메모리를 한눈에 비교 가능
+- Grafana Tier2 "DataLoader Throughput (steps/sec)" — 스크립트가 직접
+  노출하는 `train_steps_total` 카운터 기반, 스크레이프 타이밍에 영향받지
+  않는 정확한 처리량 그래프
 
-**실측 결과 (이전 계정 · 동시 실행 버전, 2026-08-14, 4분간 관찰)**:
+**실측 결과 (2026-08-21, 순차 실행, 100초간 관찰 — 정식 실행은 180초
+기본값)**:
 
-| 워크로드 | 처리량(스텝, 동일 시간) | 평균 GPU_UTIL | 평균 MEM_COPY_UTIL |
+| 워크로드 | 처리량(스텝, 100초 동일 구간) |
+|---|---|
+| `bad-code-workload` (num_workers=0) | 10 |
+| `efficient-workload` (num_workers=4) | 50 (5배) |
+
+**튜닝 — matmul 반복 횟수를 10→60회로 늘림 (2026-08-21)**: 처음엔
+matmul 10회(연산 시간 0.33초)였는데, Prometheus 스크레이프 간격(30초)에
+비해 연산 시간이 너무 짧아서 GPU_UTIL 그래프가 두 워크로드 다 대부분
+0%로 보이고 어쩌다 한 번씩만 스파이크가 찍히는 문제가 있었다(실측:
+bad-code는 duty cycle ≈5%, efficient도 겨우 ≈16.5% — "0% vs 100%"가
+아니라 둘 다 대부분 idle인데 정도만 다른 상황). matmul을 60회(연산 시간
+≈1.88초)로 늘리자 `efficient-workload`의 연산 시간(1.88초)이 4-worker
+데이터 준비 시간(≈1.6초)을 넘어서면서 **진짜로 연산 병목(compute-bound)**
+상태가 됐고, 실측으로 확인한 그래프 패턴이 뚜렷하게 갈렸다:
+- `efficient-workload`: 연속 4개 샘플(40초) 동안 GPU_UTIL 97~100% —
+  **끊김 없이 계속 높음**
+- `bad-code-workload`: `100,100,100,0,0,0,100,100` — **켜짐/꺼짐이
+  뚜렷하게 반복**
+
+**그래프 읽는 법(중요)**: 두 워크로드 다 실제 연산 순간엔 100%를 찍는다
+— 피크 값 자체는 같다. 구분 신호는 **"중간에 0%로 떨어지는 구간이
+있느냐"**다 — bad code는 계산 한 번 하고 다음 데이터를 기다리며 GPU가
+완전히 노는 구간이 그래프에 뚝뚝 끊겨서 보이고, efficient는 다음
+배치가 미리 준비돼 있어서 끊기지 않고 쭉 이어진다. 그래도 가장 확실한
+지표는 여전히 스크립트가 직접 출력하는 처리량(step 수)이다.
+
+**참고 — GPU time-slicing은 시도했다가 되돌림 (2026-08-21)**: 물리 GPU
+1개를 `nvidia.com/gpu` 2개로 스케줄 가능하게 만들어(`ClusterPolicy.spec.devicePlugin.config`
+→ `time-slicing-config`, `replicas: 2`) 두 pod를 진짜 동시에 `Running`
+상태로 띄우는 것까지는 성공(5배 처리량 차이도 그대로 확인됨). 하지만
+Grafana의 per-pod GPU_UTIL 패널에서 선이 끊겨 보이는 문제가 발견됨
+— 실측해보니 두 pod가 동시에 GPU를 쓰는데도 `DCGM_FI_DEV_GPU_UTIL`
+시리즈가 1개만 잡히고 라벨도 기대와 다르게 나옴. `DCGM_FI_DEV_GPU_UTIL`
+같은 DCGM 메트릭은 **디바이스 단위**지 프로세스별이 아니라서, time-slicing
+으로 여러 pod가 번갈아 물리 GPU를 점유할 때 "이 순간 어느 pod 것인지"를
+스크레이프마다 하나로만 결정할 수밖에 없다 — 이건 이 프로젝트의 설정
+실수가 아니라 **time-slicing(격리 없이 연산 사이클만 멀티플렉싱) 자체의
+근본적인 관측성 한계**다. 그래서 데모용으로는 GPU를 온전히 하나씩 점유하는
+순차 실행이 그래프도 깔끔하고 더 적합하다고 판단해 되돌렸다
+(`ClusterPolicy.spec.devicePlugin.config` 제거, 노드 allocatable도 다시
+1로 확인됨). Time-slicing 자체는 MIG와 달리 T4/A10G/L4 등 이 클러스터의
+모든 GPU 세대에서 동작하는 게 확인됐으니, "동시성"이 필요하고 per-pod
+그래프 정확도가 중요하지 않은 다른 데모(예: 순수 스케줄링 데모)에는 다시
+켤 수 있다.
+
+**최종 3종 비교 (2026-08-21, Grafana Tier2 실측 스크린샷)**: 세 스크립트를
+순서대로(`bad-code` → `efficient` → `more-efficient`) 전부 돌려서
+"GPU Utilization per Pod", "GPU Memory Used per Pod", "DataLoader
+Throughput (steps/sec)" 세 패널에서 동시에 확인:
+
+![Scenario 5 결과: Tier2 대시보드에서 bad-code/efficient/more-efficient 세 워크로드의 GPU 사용률, 메모리, 처리량 비교](image/scenario5-result.png)
+
+| 워크로드 | GPU_UTIL 패턴 | 처리량(steps/sec) | GPU 메모리 |
 |---|---|---|---|
-| `bad-code-workload` (num_workers=0) | 40 | **0%** | **0%** |
-| `efficient-workload` (num_workers=4) | 160 (4배) | **12%** | **5.25%** |
+| `bad-code-workload` (num_workers=0, matmul×10) | 대부분 0%, 짧은 스파이크 1회(~90%) | ~0.13\~0.15 | ~380MB |
+| `efficient-workload` (num_workers=4, matmul×10) | 0%↔100% 반복(스파이크 2회) | ~0.5\~0.65 | ~430MB |
+| `more-efficient-workload` (num_workers=4, matmul×60) | 뜨고 나서 **끊김 없이 계속 100%** | ~0.35\~0.55 | ~450MB |
 
-처리량 4배 차이가 그대로 GPU 이용률 차이로 이어졌다 — `bad-code-workload`는
-관찰 window 내내 GPU_UTIL/MEM_COPY_UTIL이 사실상 0%에 머물러서, 문서가
-말하는 "비싼 GPU를 사놓고 놀리고 있다"는 상황을 정량적으로 보여준다. (문서
-원문은 "메모리 90%↑, 연산만 주기적으로 0%" 패턴을 가정하지만, 실측해보니 이
-워크로드에서는 메모리 활동도 연산과 함께 거의 0으로 같이 떨어진다 — 그래도
-핵심 메시지인 "코드가 나쁘면 GPU가 논다"는 동일하게 증명된다.)
+의도한 대로 정확히 나뉘었다 — `bad-code`는 대부분 idle, `efficient`는
+스파이크가 반복(아직 완전히 연속은 아님), `more-efficient`는 한번 뜨고
+나면 그래프가 완전히 이어진다.
+
+흥미로운 지점 하나: **처리량(steps/sec) 자체는 `more-efficient`가
+`efficient`보다 오히려 약간 낮다.** `efficient`는 데이터 준비 시간
+(~1.6초, num_workers=4 병목)이 연산 시간(matmul×10, ~0.33초)보다 길어서
+**데이터로더가 병목**이고, `more-efficient`는 연산 시간을 늘려서
+(matmul×60, ~1.88초) 오히려 **연산 자체가 병목**이 되도록 바꾼 것이기
+때문이다 — "그래프를 깔끔하게 만들기 위해 일부러 연산 시간을 늘렸더니
+초당 처리 스텝 수는 줄어드는" 트레이드오프가 실측으로 그대로 드러난다.
+GPU 메모리 사용량은 세 워크로드 다 비슷한 범위(~380\~450MB)인데, 이건
+당연하다 — 모델(4096×4096 텐서 하나)과 배치 크기가 동일하니 메모리
+사용량은 `num_workers`/matmul 반복 횟수와 무관하다.
 
 ---
 
@@ -598,101 +710,170 @@ Sources: [How to set up KServe autoscaling for vLLM with KEDA](https://developer
 
 ## 시나리오 9 — KServe Serverless(Knative) + vLLM 진짜 Scale-to-Zero
 
-> **상태: 설계 확정, 내일 구현 예정 (2026-08-20 작성 — 시나리오 8에서
-> KEDA 방식이 0에서 요청이 와도 자동으로 못 깨어난다는 걸 실측으로 확인한
-> 직후, 같은 모델을 KServe 원래 방식인 Knative Serverless 모드로 서빙해서
-> "진짜 요청 기반 wake-from-zero"가 실제로 되는지 나란히 비교하기 위해
-> 설계함).**
+> **상태: 완료, 실측 검증됨 (2026-08-21, sandbox623 클러스터에서 라이브로
+> 구축·검증). 시나리오 8이 실측으로 확인한 한계(KEDA는 0에서 요청이 와도
+> 자동으로 못 깨어남)를 뒤집어서, Knative Activator가 요청 경로에 있으면
+> 실제로 되는지 검증 완료.**
 
-**보여주는 것**: 시나리오 8이 정직하게 드러낸 한계(replica 0일 때 요청이
-와도 KEDA는 감지도 못 하고 응답도 DNS 단계에서부터 실패)를 그대로
-뒤집어서, **Knative의 Activator가 요청 경로에 있으면 실제로 되는지**
-확인한다. 같은 모델(`Qwen/Qwen2.5-0.5B-Instruct`)·같은 vLLM 설정을 두
-배포 모드(RawDeployment+KEDA vs Serverless+Knative)로 나란히 놓고
-비교하는 게 핵심 — "이게 원래 KServe가 scale-to-zero를 하도록 설계된
-방식"이라는 것을 직접 보여준다.
+**보여주는 것**: 같은 모델(`Qwen/Qwen2.5-0.5B-Instruct`)·같은 vLLM 설정을
+Serverless+Knative 모드로 배포해서, **진짜 요청 기반 0→1 자동 기동**이
+되는지 확인한다 — 이게 원래 KServe가 scale-to-zero를 하도록 설계된
+방식이다.
 
-**구성 (계획)**:
-- OpenShift Serverless Operator(Knative Serving) 설치 — 이번엔 Service
-  Mesh 회피를 포기하고 실제로 필요한 걸 설치한다. 다만 최신 Knative
-  Serving은 Kourier 같은 가벼운 네트워킹 레이어로 **Service Mesh 없이도**
-  설치 가능한 경우가 많아서, 정말 Service Mesh까지 필요한지 이 클러스터
-  기준으로 직접 확인할 것 (추측 금지)
-- `InferenceService`를 `serving.kserve.io/deploymentMode: Serverless`로
-  배포 (RawDeployment 대신) — 시나리오 8에서 이미 확인된 값 재사용
-  (`--enforce-eager`, 메모리 12Gi, 같은 모델)
-- 오토스케일링은 KServe 자체 Knative 기반 오토스케일러가 담당 — KEDA도,
-  `autoscalerClass: external` 어노테이션도 필요 없음(기본값이 Knative)
+**구성 (실제 적용)**:
+- `OpenShift Serverless Operator`(`serverless-operator`, stable 채널) +
+  `Red Hat OpenShift Service Mesh 2`(`servicemeshoperator`, stable 채널)
+  설치 — **Service Mesh는 실제로 필수였다**: RHOAI의 `DSCInitialization`이
+  `ServiceMeshControlPlane` 이름/네임스페이스를 `istio-system/data-science-smcp`로
+  하드코딩하고 있어서, 다른 이름으로 만들면 `KserveReady=False (ServiceMesh
+  is not ready)`로 조용히 실패한다.
+- `ServiceMeshMemberRoll/default`에 `knative-serving` + InferenceService가
+  있는 네임스페이스(`gpu-kserve-scenario-9`) 등록
+- DataScienceCluster: `kserve.serving.managementState: Managed`로 전환 →
+  RHOAI가 `KnativeServing` CR을 자동 생성
+- `InferenceService`에 `serving.kserve.io/deploymentMode: Serverless`
+  annotation, `minReplicas: 0` (RawDeployment 대신) — 시나리오 8에서 이미
+  확인된 값 재사용(`--enforce-eager`, 메모리 12Gi, 같은 모델). `ServingRuntime`은
+  네임스페이스 스코프라 이 네임스페이스에도 별도로 생성 필요.
 
-**검증할 것**: replica 0인 상태에서 실제 추론 요청을 보내서 — Activator가
-요청을 붙잡아뒀다가 pod가 뜨면 넘겨주는지, 응답이 (콜드스타트 지연은
-있더라도) 실제로 성공하는지 확인. 콜드스타트 지연시간을 실측하고, 시나리오
-8과 정확히 같은 조건(같은 모델, 같은 하드웨어)에서 비교표로 정리 —
-0→1 자동 여부, 콜드스타트 시 요청 성공 여부, 설치 복잡도/추가 오퍼레이터
-수.
+**실제로 부딪힌 문제들 (전부 이 랩 클러스터가 작아서/처음 설치라서 생긴 것)**:
+1. Knative의 HA 컨트롤플레인(activator 등 replica=2 기본값)이 뜰 자리가
+   없어 워커 노드 하나 증설 필요
+2. Knative `Gateway` 리소스의 selector(`knative: ingressgateway`)가 실제
+   istio-ingressgateway pod 라벨(`istio: ingressgateway`)과 안 맞아서 TLS
+   SNI 핸드셰이크 자체가 실패 — Deployment에 라벨 추가로 해결
+3. InferenceService에 기본 적용되는 `automountServiceAccountToken: false`
+   때문에 istio 사이드카가 자기 신원 인증용 토큰을 못 받아 mesh 인증 실패
+   — SMCP의 identity 방식을 `ThirdParty`(전용 bound token)로 바꿔서 해결
+   (Knative는 이 필드 자체를 revision에서 오버라이드 못 하게 막아놨음)
+4. mesh 전체 STRICT mTLS가 Knative 자체 내부 메트릭 스크레이핑까지 막아서
+   스케일다운이 하염없이 안 됨 — PERMISSIVE로 낮춰서 해결
+5. 위 설정 변경들 전에 이미 떠 있던 activator/autoscaler pod는 새 설정을
+   못 받은 채로 계속 인증 실패 루프에 갇힘 — `oc rollout restart`로 해결.
+   **즉 Knative Serving을 처음 설치할 때 이런 identity/mTLS 설정을
+   나중에 바꾸면, 이미 떠 있는 모든 control-plane 컴포넌트를 재시작해야
+   한다.**
 
-**harness 구현은 아직**: 내일 진행. Knative Serving 설치가 이 클러스터의
-Service Mesh 상황(있는지, 필요한지)에 따라 달라질 수 있어서 추측 없이
-직접 확인 후 작성.
+**실측 결과 (1차 — `hf://` 로 매 콜드스타트마다 Hugging Face Hub에서 재다운로드)**:
+| 항목 | 값 |
+|---|---|
+| 콜드스타트(pod 생성 → 3/3 Ready, 모델 로드 완료) | 약 70~110초 |
+| warm 상태 응답 시간 | 0.3~0.5초 |
+| **0→1 자동 기동 자체** | **성공** (시나리오 8과의 핵심 차이) |
+| **콜드스타트를 유발한 그 요청 자체의 성공 여부** | **대부분 실패** — 서빙 경로 어딘가(Activator/게이트웨이)에 약 60초 근처의 타임아웃이 있어서, 클라이언트가 아무리 긴 타임아웃을 줘도 모델 로드(70~110초)보다 먼저 끊긴다. 끊긴 직후 재요청하면 즉시 성공(pod가 백그라운드에서 계속 떠서 이미 준비돼 있으므로) |
+
+**개선 — PVC 사전 캐싱**: `storage-initializer` initContainer가 매번
+`hf://Qwen/Qwen2.5-0.5B-Instruct`를 pod 전용 `emptyDir`(pod 삭제되면 같이
+사라짐)로 받고 있다는 걸 확인 → 모델을 한 번만 내려받아 PVC(`gp3-csi`,
+`ReadWriteOnce`, 5Gi — GPU 노드가 1대뿐이라 RWX 불필요)에 저장해두고,
+InferenceService의 `storageUri`를 `hf://...` 대신 `pvc://qwen-model-cache/`
+로 바꿔서 이후 콜드스타트는 네트워크 다운로드 없이 PVC를 그대로 마운트하게
+변경.
+
+| 항목 | 이전 (`hf://`) | 이후 (`pvc://`) |
+|---|---|---|
+| pod 생성 → 모델 준비(`Application startup complete`) | 약 70~110초 | **약 49초** (실측: `01:00:35` → `01:01:24`) |
+| 콜드스타트를 유발한 첫 요청 자체 | 대부분 실패(재시도 필요) | **성공** — 50.47초 만에 실제 응답 수신, 재시도 불필요 |
+
+**결론**: Knative Serverless는 시나리오 8과 달리 **진짜로 0에서 자동으로
+깨어난다** — 이게 핵심 차이다. 처음엔 "빠르지는 않다"였는데(LLM을 GPU에
+로드하는 데만 70~110초가 걸려 서빙 경로의 기본 타임아웃보다 길었음),
+**PVC 사전 캐싱으로 모델 재다운로드를 없애자 콜드스타트가 49초로
+줄어들면서 그 타임아웃 벽 아래로 들어왔고, 콜드스타트를 유발한 요청
+자체가 재시도 없이 성공하게 됐다.** 그래도 여전히 50초는 사용자가
+실시간으로 기다리기엔 느린 편이라, 클라이언트 쪽 retry-with-backoff은
+여전히 권장되는 안전장치다 — 이건 시나리오 10에서 이미 계획했던
+"콜드스타트 갭을 숨기지 않고 정직하게 보여준다"는 방향과 맞닿아 있다.
 
 ---
 
-## 시나리오 10 — Scale-to-Zero 상태의 모니터링
+## 시나리오 10 — Scale-to-Zero 상태의 모니터링 (KEDA vs Knative)
 
-> **상태: 설계 확정, 시나리오 8이 실제로 떠 있어야 구현 가능 (2026-08-20).**
+> **상태: 완료, 메트릭·로깅 둘 다 실측 검증됨 (2026-08-21).**
 
-**보여주는 것**: 0으로 스케일다운되면 "pod가 없는데 뭘 모니터링하지?"라는
-질문이 자연스럽게 나온다. 그리고 시나리오 8을 만들면서 실제로 발견한 진짜
-문제가 있다 — Knative Serverless 모드는 요청 경로에 Activator가 끼어있어서
-콜드스타트 중에 들어온 요청을 붙잡아뒀다가 pod가 뜨면 넘겨주는데, Service
-Mesh 의존성을 피하려고 일부러 고른 **KEDA 기반 방식은 그런 버퍼링이
-없다** — replica가 0일 때 요청이 오면 받아줄 pod가 아예 없어서 그냥
-실패한다. 이 시나리오는 이 트레이드오프를 숨기지 않고, pod 생존 여부와
-무관한 신호들로 어떻게 정직하게 관측하는지를 보여준다.
+**보여주는 것**: 시나리오 8(KEDA)과 시나리오 9(Knative)가 둘 다 0
+replica로 idle한 상태에서, 각각 실제로 무엇이 관측 가능한지 나란히
+비교한다. pod가 없을 때도 "지금 몇 대 떠 있는지"는 항상 볼 수 있어야
+하고, 콜드스타트를 유발한 요청이 실제로 어떻게 되는지(KEDA는 실패, Knative는
+지연 후 성공)도 숨기지 않고 그대로 보여준다.
 
-**모니터링 레이어 (계획)**:
-1. **시간에 따른 replica 수** — `kube_deployment_status_replicas{deployment="qwen-vllm-predictor"}`
-   (kube-state-metrics 제공, OpenShift 자체 모니터링이 이미 수집 중)를
-   Grafana 패널로 추가 — 이건 API 서버를 통해 Deployment 오브젝트의
-   status에서 나오는 값이라 pod 존재 여부와 무관하게 항상 조회 가능하고,
-   0↔1 전환이 타임라인에 그대로 보인다
-2. **KEDA 자체 트리거 메트릭** — `keda-metrics-apiserver`가 ScaledObject의
-   현재 트리거 값(예: 큐 깊이)을 replica=0 상태에서도 노출한다 — 즉
-   스케일업이 실제로 일어나기 *전에* "왜 곧 스케일업될지"를 먼저 볼 수 있다
-3. **콜드스타트 갭을 정직하게 보여주기** — replica=0인 상태에서 실제 요청을
-   보내서 진짜 어떻게 되는지(연결 거부/5xx, 우아하게 큐잉되는 게 아님)
-   확인하고 데모에 그대로 포함시킨다. 표준 완화책(클라이언트 쪽
-   retry-with-backoff)도 같이 설명 — 서버 쪽에서 이걸 고치려면 결국
-   Knative Activator(그리고 Service Mesh)를 다시 들여와야 하는데, 그건
-   이 설계 전체가 피하려고 한 바로 그 의존성이다
-4. 일단 스케일업되고 나면 vLLM 자체 Prometheus 메트릭(큐 깊이, 레이턴시,
-   초당 토큰 수)이 정상적으로 다시 나오고, 이미 구축된 Thanos/Grafana
-   스택에 그대로 연결된다
+**실제로 부딪힌 문제 — 독립 Prometheus가 kube-state-metrics를 전혀
+못 보고 있었다**: 기존 Tier1 대시보드의 "Estimated GPU Cost" 패널이
+`kube_pod_container_resource_requests`를 쓰고 있었는데, 실측해보니 이
+메트릭이 계속 빈 값이었다 — 즉 그 패널은 처음부터 조용히 깨져 있었다.
+원인은 두 가지:
+1. 우리 독립 Prometheus에 kube-state-metrics를 스크레이프하는
+   ServiceMonitor 자체가 없었음 → 추가했으나, 플랫폼의 kube-state-metrics는
+   `https-main` 포트에 kube-rbac-proxy가 앞에 있어서 그냥 스크레이프가
+   안 됨 — ServiceAccount `gpu-alert-prometheus`에 `cluster-monitoring-view`
+   ClusterRole을 바인딩하고, 그 SA의 토큰 Secret을 만들어
+   `authorization.credentials`로 붙여야 함
+2. Prometheus CR(`gpu-alert-prom`)의 `serviceMonitorSelector`가
+   `{matchLabels: {app: nvidia-dcgm-exporter}}`로 좁게 고정돼 있어서 새
+   ServiceMonitor를 아예 무시하고 있었음 — `{}`(전체 매치)로 넓혀야 함.
+   단, `oc patch --type=merge`로 빈 객체 `{}`를 주면 기존 matchLabels가
+   안 지워진다(머지 패치는 삭제를 표현 못 함) — `--type=json`으로
+   `replace`해야 실제로 적용됨
+3. kube-state-metrics는 자기 자신(kube-rbac-proxy 사이드카)의 `namespace`
+   라벨과 실제로 관측 중인 워크로드의 `namespace` 라벨이 충돌하는데,
+   `honorLabels: true`를 줘도 이 경우엔 충돌 라벨이 `exported_namespace`로
+   밀려남(DCGM 때와 증상은 비슷하지만 완전히 같지는 않음) — 실전 쿼리는
+   `namespace`가 아니라 **`exported_namespace`** 라벨을 써야 함
 
-**로깅 — pod가 계속 바뀌는데 로그는 어떻게 유지하는가**: 메트릭(위 1~4)은
-Prometheus/Thanos가 외부에 저장하니 pod 재시작과 무관하게 살아남지만,
-**pod 로그 자체는 pod가 삭제되면 그냥 사라진다.** 이걸 실제로 보여주려면
-**OpenShift Logging(Loki 기반)**을 설치해서 pod가 죽기 전에 로그를
-중앙으로 실어날라야 한다:
-- **오브젝트 스토리지 필수**: 현재(Loki 기반) OpenShift Logging의
-  `LokiStack`은 PVC만으로는 안 되고 S3 호환 오브젝트 스토리지가 반드시
-  있어야 한다. 이 랩 환경엔 실제 S3가 없으므로 **클러스터 안에 MinIO를
-  직접 띄워서 그 역할을 대신**한다 (Red Hat이 실제 클라우드 오브젝트
-  스토리지가 없는 테스트/데모 환경에서 공식적으로 권장하는 방식).
-- **구성 (계획)**: MinIO(Deployment + PVC + Service, 버킷 생성) →
-  Loki Operator + Red Hat OpenShift Logging Operator 설치 → MinIO를
-  가리키는 `LokiStack` CR (S3 엔드포인트/버킷/자격증명을 Secret으로) →
-  `ClusterLogForwarder`로 애플리케이션 로그(특히 `gpu-kserve-scenario-8`
-  네임스페이스)를 LokiStack으로 전달
-- **검증 방법**: `qwen-vllm-predictor` pod가 요청을 처리하는 로그를 찍고
-  → KEDA가 0으로 스케일다운해서 그 pod가 삭제됨 → `oc logs`로는 더 이상
-  안 보이지만, **Loki 쪽(OpenShift 콘솔의 Observe → Logs, 또는 기존
-  Grafana에 Loki 데이터소스 추가해서 조회)에서는 `app=isvc.qwen-vllm-predictor`
-  라벨로 여전히 조회된다** — 이게 이 시나리오의 핵심 증명 포인트
+**모니터링 레이어 (실제 구현)**:
+1. **시간에 따른 replica 수** — Grafana Tier1 대시보드에 새 row
+   "Scale-to-Zero Monitoring (Scenario 10)" 추가, 두 패널:
+   `kube_deployment_status_replicas{exported_namespace="gpu-kserve-scenario-8", deployment="qwen-vllm-predictor"}` (KEDA)와
+   `kube_deployment_status_replicas{exported_namespace="gpu-kserve-scenario-9", deployment=~"qwen-vllm-serverless-predictor.*"}` (Knative) — pod 존재 여부와 무관하게 항상 조회 가능
+2. **콜드스타트 갭을 정직하게 보여주기** — `~/scenario10-scalezero-monitor-demo.sh`가
+   두 시나리오에 각각 실제 요청을 보내서 실측:
+   - KEDA(시나리오 8): `Could not resolve host` — DNS 단계에서부터 그냥 실패
+   - Knative(시나리오 9): 51초 뒤 실제 응답 성공 (`{"id":"cmpl-...","choices":[...]}`),
+     재시도 불필요 — 시나리오 9의 PVC 캐싱 개선 덕분에 이제 첫 요청부터 성공함
+   - Knative 쪽은 `oc get pa -n gpu-kserve-scenario-9`로 `DESIREDSCALE`/`ACTUALSCALE`/`REASON`(NoTraffic → Queued → 등)이
+     실시간으로 전환되는 것도 함께 시연
+3. Knative 자체 control-plane 메트릭(activator/autoscaler의 `/metrics`,
+   포트 9090)은 시도했으나 **아직 막혀 있음** — `config-observability`의
+   `metrics.backend-destination`을 `none`에서 `prometheus`로 바꾸고
+   activator/autoscaler를 재시작까지 했는데도 포트 자체가 안 열림. 표면적
+   설정 문제가 아니라 더 깊은 원인이 있어 보여서, 이번엔 이미 검증된
+   kube-state-metrics 신호로 실용적으로 우회함 — Knative 자체 메트릭은
+   추후 별도로 조사할 것.
 
-**harness 구현은 아직**: 시나리오 8의 실제 InferenceService/ScaledObject가
-떠 있어야 진짜 대시보드 패널/알람/로깅 파이프라인을 실제로 만들고 검증할
-수 있어서, 추측 없이 실제 환경에서 만들 예정.
+**로깅 — 완료, 실측 검증됨 (2026-08-21)**: `./harness.sh openshift-logging`
+(MinIO + Loki Operator + LokiStack + ClusterLogForwarder)을 이 클러스터에
+실제로 설치하고, scenario9를 깨워 로그를 남긴 뒤 pod가 삭제된 후에도
+Loki에서 조회되는지 끝까지 검증했다. `oc logs <삭제된 pod>`는
+`NotFound`지만, 같은 로그가 Loki 쪽엔 여전히 남아있음을 확인 — 이게 이
+시나리오의 핵심 증명 포인트다.
+
+실제로 부딪힌 문제 4가지 (전부 `openshift-logging.sh`에 반영/수정):
+1. **오퍼레이터 채널명이 문서와 다름** — `loki-operator`, `cluster-logging`
+   둘 다 `stable` 채널이 없음. 게다가 **같은 이름의 패키지가 카탈로그마다
+   다른 채널을 제공**한다 — `community-operators`의 `loki-operator`는
+   `alpha`뿐이지만, 우리가 실제로 쓰는 `redhat-operators`의
+   `loki-operator`는 `stable-6.5`/`stable-6.6`. 카탈로그를 명시하지 않고
+   `oc get packagemanifest <이름>`만 조회하면 엉뚱한 카탈로그의 채널을
+   보게 될 수 있음 — 반드시 `--field-selector`나 `-o
+   custom-columns=...CATALOG:.status.catalogSource`로 카탈로그까지 확인할 것
+2. **GPU 노드에 collector pod가 아예 안 뜸** — `nvidia.com/gpu:NoSchedule`
+   taint를 collector DaemonSet이 tolerate 안 해서, GPU 워크로드(시나리오
+   8/9 전부)의 로그가 애초에 수집조차 안 되고 있었음.
+   `ClusterLogForwarder.spec.collector.tolerations`에 추가해서 해결
+3. **LokiStack 게이트웨이 인증서 TLS 신뢰 실패** — "self-signed
+   certificate in certificate chain". `logging-loki-ca-bundle`
+   ConfigMap이 정답처럼 보이지만 실제로는 **틀린 CA**(그 안엔 Loki
+   Operator 자체 내부 서명 CA가 들어있음). 실제 게이트웨이 인증서
+   (`logging-loki-gateway-http`)는 **OpenShift 플랫폼 service-ca**로
+   서명돼 있어서, 모든 네임스페이스에 자동 주입되는 표준
+   `openshift-service-ca.crt` ConfigMap을 참조해야 함
+4. **쓰기 권한 403 Forbidden** — `collect-application-logs` ClusterRole은
+   노드 로그 파일을 *읽는* 권한이지 LokiStack 게이트웨이에 *쓰는* 권한이
+   아님. 실제 쓰기 권한은 별도 ClusterRole
+   `logging-collector-logs-writer`(`loki.grafana.com/application`,
+   resourceName `logs`, verb `create`)에 있고, **ClusterRoleBinding 하나만으로는
+   안 되고 같은 네임스페이스(`openshift-logging`)에 RoleBinding도 별도로
+   있어야** 실제로 통과됨
 
 ---
 

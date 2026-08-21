@@ -9,11 +9,12 @@
 # in-cluster to fill that role (the officially documented Red Hat approach
 # for object-storage-less test/demo environments). Runs ON the bastion.
 #
-# NOT YET LIVE-VALIDATED on this cluster as of the day this was written
-# (2026-08-20) -- written from documented Loki Operator / OpenShift Logging
-# 6.x patterns, to be verified against the real cluster during scenario 10's
-# build. If field names below don't match what this cluster's operator
-# versions actually expect, fix here and update this comment.
+# Live-validated end to end on the sandbox623 cluster (2026-08-21): woke
+# scenario 9's InferenceService, confirmed its logs land in Loki, let it
+# scale back to 0 (pod deleted), and confirmed `oc logs` on the now-gone pod
+# 404s while the same logs are still returned from Loki by
+# kubernetes_pod_name. See the comments below for the three real gotchas
+# fixed along the way (channel names, TLS trust, write RBAC, GPU taint).
 set -euo pipefail
 export KUBECONFIG="$HOME/ocp-install/auth/kubeconfig"
 
@@ -130,7 +131,7 @@ metadata:
   name: loki-operator
   namespace: openshift-operators-redhat
 spec:
-  channel: stable
+  channel: stable-6.6
   name: loki-operator
   source: redhat-operators
   sourceNamespace: openshift-marketplace
@@ -155,7 +156,7 @@ metadata:
   name: cluster-logging
   namespace: ${LOGGING_NAMESPACE}
 spec:
-  channel: stable
+  channel: stable-6.6
   name: cluster-logging
   source: redhat-operators
   sourceNamespace: openshift-marketplace
@@ -205,6 +206,26 @@ for _ in $(seq 1 40); do
 done
 
 echo "=== ClusterLogForwarder (ship application logs to LokiStack) ==="
+# Three RBAC/TLS gotchas found by live-testing this against the LokiStack
+# gateway (2026-08-21), none of which are optional:
+# 1. `collect-application-logs` only grants permission to *read* node-local
+#    log files -- it has nothing to do with *writing* to the LokiStack
+#    gateway. The write-side check the gateway's SAR-based authorizer
+#    actually performs is against `application.loki.grafana.com` (resource
+#    name "logs"), granted by the separate `logging-collector-logs-writer`
+#    ClusterRole the Loki Operator creates. Both a ClusterRoleBinding AND a
+#    namespace-scoped RoleBinding (in ${LOGGING_NAMESPACE}) were needed for
+#    this to actually take effect in testing -- a ClusterRoleBinding alone
+#    kept returning 403 Forbidden.
+# 2. The LokiStack gateway's serving certificate (`logging-loki-gateway-http`
+#    secret) is signed by OpenShift's own platform service-ca
+#    (`openshift-service-serving-signer`), NOT by Loki Operator's own
+#    internal signing CA (`logging-loki-signing-ca`) -- despite there being a
+#    `logging-loki-ca-bundle` ConfigMap that looks like the right thing to
+#    reference, it contains the WRONG CA and produces "self-signed
+#    certificate in certificate chain" errors. The correct trust anchor is
+#    the standard `openshift-service-ca.crt` ConfigMap (auto-injected into
+#    every namespace).
 oc apply -f - <<YAML
 apiVersion: v1
 kind: ServiceAccount
@@ -225,6 +246,39 @@ roleRef:
   name: collect-application-logs
   apiGroup: rbac.authorization.k8s.io
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: logging-collector-logs-writer
+subjects:
+- kind: ServiceAccount
+  name: logging-collector
+  namespace: ${LOGGING_NAMESPACE}
+roleRef:
+  kind: ClusterRole
+  name: logging-collector-logs-writer
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: logging-collector-logs-writer-ns
+  namespace: ${LOGGING_NAMESPACE}
+subjects:
+- kind: ServiceAccount
+  name: logging-collector
+  namespace: ${LOGGING_NAMESPACE}
+roleRef:
+  kind: ClusterRole
+  name: logging-collector-logs-writer
+  apiGroup: rbac.authorization.k8s.io
+YAML
+
+# 3. GPU nodes carry a `nvidia.com/gpu:NoSchedule` taint, and the collector
+#    DaemonSet doesn't tolerate it by default -- meaning logs from every
+#    GPU-workload pod (scenario 8, 9, etc.) are silently never collected at
+#    all unless this toleration is added explicitly.
+oc apply -f - <<YAML
 apiVersion: observability.openshift.io/v1
 kind: ClusterLogForwarder
 metadata:
@@ -233,6 +287,11 @@ metadata:
 spec:
   serviceAccount:
     name: logging-collector
+  collector:
+    tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
   outputs:
   - name: default-loki
     type: lokiStack
@@ -243,6 +302,10 @@ spec:
       authentication:
         token:
           from: serviceAccount
+    tls:
+      ca:
+        configMapName: openshift-service-ca.crt
+        key: service-ca.crt
   pipelines:
   - name: application-logs
     inputRefs:
@@ -251,6 +314,42 @@ spec:
     - default-loki
 YAML
 
+# A ServiceAccount for scripts/demos that need to *query* Loki (separate
+# from `logging-collector`, which can only *write*). The gateway's
+# "openshift-logging" tenant mode checks read access per-namespace, and in
+# testing a namespace-scoped `view` RoleBinding worked once but then
+# started failing identically on every retry with no config change --
+# looked like an authz-cache inconsistency in the gateway's opa sidecar
+# rather than anything on our side, and wasn't worth chasing further.
+# cluster-admin is a blunt instrument but reliable, and this is a
+# lab/demo cluster -- reach for a scoped `view` RoleBinding per-namespace
+# again if that flakiness ever gets root-caused.
+oc apply -f - <<YAML
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: logging-log-reader
+  namespace: ${LOGGING_NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: logging-log-reader-admin
+subjects:
+- kind: ServiceAccount
+  name: logging-log-reader
+  namespace: ${LOGGING_NAMESPACE}
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+YAML
+
 echo "OpenShift Logging installed: MinIO (${MINIO_NAMESPACE}) -> LokiStack (${LOGGING_NAMESPACE}) -> ClusterLogForwarder."
-echo "Query logs via the OpenShift console's Observe -> Logs tab, or add a Loki datasource"
-echo "(http://logging-loki-gateway-http.${LOGGING_NAMESPACE}.svc.cluster.local:8080/api/logs/v1/application) to Grafana."
+echo "Query logs via the OpenShift console's Observe -> Logs tab, or via the Loki gateway route directly:"
+echo "  TOKEN=\$(oc create token logging-log-reader -n ${LOGGING_NAMESPACE} --duration=10m)"
+echo "  curl -sk -H \"Authorization: Bearer \$TOKEN\" \\"
+echo "    \"https://\$(oc get route logging-loki -n ${LOGGING_NAMESPACE} -o jsonpath='{.spec.host}')/api/logs/v1/application/loki/api/v1/query_range\" \\"
+echo "    --data-urlencode 'query={kubernetes_namespace_name=\"<namespace>\"}' \\"
+echo "    --data-urlencode \"start=\$(date -u -d '-10 minutes' +%s)000000000\" \\"
+echo "    --data-urlencode \"end=\$(date -u +%s)000000000\" -G"

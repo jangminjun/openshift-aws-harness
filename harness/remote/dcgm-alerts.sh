@@ -103,6 +103,21 @@ spec:
   endpoints:
   - port: gpu-metrics
     path: /metrics
+    # Without this, DCGM's own injected namespace/pod labels (the real GPU
+    # consumer's identity) lose the label collision against this
+    # ServiceMonitor's own target-level namespace/pod (the exporter's own,
+    # nvidia-gpu-operator/nvidia-dcgm-exporter-xxxxx) and get silently
+    # renamed to exported_namespace/exported_pod instead -- breaking every
+    # per-pod/per-tenant panel and template variable that filters on
+    # {namespace="..."}. Found missing here 2026-08-21 while debugging why
+    # Tier2's $namespace dropdown never offered demo namespaces: the
+    # ClusterPolicy-level honorLabels fix (spec.dcgmExporter.serviceMonitor.honorLabels)
+    # only applies to the GPU Operator's OWN auto-generated ServiceMonitor
+    # in nvidia-gpu-operator, which this standalone Prometheus doesn't even
+    # use (serviceMonitorNamespaceSelector restricts it to ServiceMonitor
+    # objects living in gpu-monitoring) -- this ServiceMonitor needs its
+    # own honorLabels set explicitly.
+    honorLabels: true
 YAML
 
 oc apply -f - <<YAML

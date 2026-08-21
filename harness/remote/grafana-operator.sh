@@ -149,5 +149,36 @@ spec:
       httpHeaderValue1: "Bearer ${TOKEN}"
 YAML
 
+# Second datasource pointed directly at this project's OWN standalone
+# Prometheus (see dcgm-alerts.sh), not the platform's Thanos Querier above.
+# Needed for any metric that ONLY exists in our own Prometheus (e.g.
+# scenario 5's train_steps_total, scraped via a ServiceMonitor the
+# platform's Thanos Querier has no knowledge of) -- thanos-querier silently
+# returns "No data" for those with no error anywhere, since DCGM-style
+# metrics happen to also be independently visible to the platform (via the
+# GPU Operator's own ServiceMonitor) but app-level custom metrics are not.
+# spec.uid is immutable once set -- delete and recreate rather than patch
+# if this ever needs to change.
+oc apply -f - <<YAML
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDatasource
+metadata:
+  name: gpu-alert-prom
+  namespace: ${MONITORING_NAMESPACE}
+spec:
+  uid: gpu-alert-prom
+  instanceSelector:
+    matchLabels:
+      dashboards: "gpu-grafana"
+  datasource:
+    name: gpu-alert-prom
+    type: prometheus
+    access: proxy
+    url: http://prometheus-operated.${MONITORING_NAMESPACE}.svc.cluster.local:9090
+    isDefault: false
+    jsonData:
+      timeInterval: 30s
+YAML
+
 ROUTE=$(oc get route gpu-grafana-route -n "$MONITORING_NAMESPACE" -o jsonpath='{.spec.host}' 2>/dev/null || echo "(route not ready yet)")
 echo "Grafana Operator installed. Dashboard URL: https://${ROUTE}  (user: admin / see 'oc get secret gpu-grafana-admin-credentials -n ${MONITORING_NAMESPACE}')"

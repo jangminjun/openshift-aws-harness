@@ -336,13 +336,21 @@ returns the cluster to a clean state.
 
 ## Scenario 5 — Bad Code Detection (Bad Code Penalty)
 
-> **Status: fully wired into the harness + measurement-validated (2026-08-14,
-> rewritten to run sequentially on 2026-08-20 — the new AWS sandbox account's
-> G/VT vCPU quota is 4, so only 1 GPU node can exist at a time and the
-> original "both pods running side by side" approach no longer works. The
-> measured results below are from the earlier account, where 2 concurrent
-> GPU pods were possible; the sequential version hasn't been re-validated
-> yet).**
+> **Status: fully wired into the harness + measurement-validated. Sequential
+> on 2026-08-20 (sandbox G/VT vCPU quota only allows 1 GPU node) ->
+> concurrent via GPU time-slicing on 2026-08-21 morning -> **back to
+> sequential, final, same afternoon**. Reason: with time-slicing, two pods
+> sharing the physical GPU made Grafana's per-pod GPU_UTIL panel render
+> broken/discontinuous lines. Root cause: DCGM metrics like
+> `DCGM_FI_DEV_GPU_UTIL` are **per-device, not per-process** — when
+> time-slicing lets multiple pods take turns on the same physical GPU, DCGM
+> can only attribute the metric to one "owner" pod per scrape, and which pod
+> wins can flip between scrapes (measured: 2 pods concurrently `Running`,
+> but only 1 series existed, with labels behaving unexpectedly). This isn't
+> a config mistake in this project — it's a fundamental observability
+> limitation of time-slicing itself (which multiplexes compute cycles
+> without isolation, unlike MIG). Reverted to two fully separate scripts,
+> each getting the whole physical GPU to itself for 3 minutes, in sequence.**
 
 **What it shows**: how much a single `DataLoader` setting — `num_workers` —
 can idle an expensive GPU, using the exact same training code, measured and
@@ -370,43 +378,141 @@ real-world cause of — and fix for — "why is my GPU utilization so low."
   `emptyDir(medium: Memory, sizeLimit: 1Gi)` at `/dev/shm` (found and fixed
   via measurement on 2026-08-14)
 
-**Run (sequential version, single-GPU-node clusters)**: a single
-`scenario5-badcode-start` deploys `bad-code-workload`, observes it for
-`OBSERVE_SECONDS` (default 60s), records its step count, deletes it, then
-immediately deploys `efficient-workload`, observes it for the same duration,
-deletes it, and prints both results side by side (can't run concurrently
-with only 1 GPU, so each is timed separately over the same duration
-instead).
+**How the training code works (brief)**:
+```python
+step = 0
+w = torch.rand((4096, 4096), device="cuda")
+for batch in loader:                  # DataLoader hands over one batch at a time
+    x = batch.to("cuda")
+    for _ in range(10):
+        y = torch.matmul(w, w)        # GPU compute -- identical for both pods
+    torch.cuda.synchronize()
+    step += 1
+    if step % 5 == 0:
+        print(f"step={step}", flush=True)   # progress line every 5 steps
+```
+With `num_workers=0`, this `for batch in loader:` line blocks in the main
+process for 0.2s × 32 samples (~6.4s) on every single batch before moving
+on. With `num_workers=4`, separate worker processes prefetch the next batch
+in the background while the GPU is busy with `matmul`, so the main loop
+barely waits at all — the only code difference between the two workloads is
+that one `num_workers` value.
+
+**How "throughput" (step count) is actually measured**:
+```bash
+oc logs "$1" -n "${DEMO_NAMESPACE}" 2>/dev/null | grep -oE 'step=[0-9]+' | tail -1 | cut -d= -f2
+```
+After sleeping for `OBSERVE_SECONDS`, every `step=N` line in that pod's logs
+is matched and the **last one** is taken as the count. So "throughput" here
+means "how many batches (32 samples each) got fully processed in the same
+wall-clock window" — a direct proxy for how much the GPU actually worked
+instead of sitting idle. Since both workloads run the exact same compute
+(60 matmuls per step), the step-count gap reflects nothing but how fast each
+one could feed the next batch to the GPU — i.e., purely the DataLoader
+bottleneck.
+
+**Run (sequential, two fully separate scripts)**: `bad-code-workload` and
+`efficient-workload` each have their own script — run them one after the
+other and each gets the whole physical GPU to itself for
+`OBSERVE_SECONDS` (default 180s / 3 minutes).
 ```bash
 # locally
-./harness.sh scenario5-badcode-start      # runs both workloads sequentially, prints the comparison
-./harness.sh scenario5-badcode-stop       # safety net (start already cleans up after each phase)
+./harness.sh scenario5-badcode-start      # deploys bad-code-workload alone, observes 3min, prints result, cleans up
+./harness.sh scenario5-efficient-start    # then efficient-workload alone, same duration
+./harness.sh scenario5-badcode-stop       # safety net (start already cleans up at the end of each)
 
-# adjust the observation window
+# adjust the observation window (default 180s each)
 OBSERVE_SECONDS=120 ./harness.sh scenario5-badcode-start
+OBSERVE_SECONDS=120 ./harness.sh scenario5-efficient-start
 ```
 
 **Watch**:
-- `scenario5-badcode-start`'s own output — steps reached by each workload
-  over the same duration, plus a computed speedup at the end
-- Grafana Tier1 "GPU Compute vs Memory Utilization (Cluster Avg)" / Tier2
-  "Stall Pattern: High Memory, Low Compute" panel — compare utilization
-  across the two time windows
+- Each script's own output — steps reached over the observation window
+- Grafana Tier1 "GPU Compute vs Memory Utilization (Cluster Avg)" —
+  fleet-wide average, both runs appear back to back on the timeline (not
+  simultaneous, but clearly contrasted in sequence)
+- Grafana Tier2 "GPU Utilization per Pod" / "GPU Memory Used per Pod" —
+  already side by side in the same row, giving a clean per-pod
+  compute-vs-memory comparison
+- Grafana Tier2 "DataLoader Throughput (steps/sec)" — driven by
+  `train_steps_total`, a counter the script exposes itself, so it's
+  accurate regardless of scrape timing
 
-**Measured result (previous account · concurrent version, 2026-08-14, observed over 4 minutes)**:
+**Measured result (2026-08-21, sequential, observed over 100s — the real run uses the 180s default)**:
 
-| Workload | Throughput (steps, same time) | Avg GPU_UTIL | Avg MEM_COPY_UTIL |
+| Workload | Throughput (steps, same 100s window) |
+|---|---|
+| `bad-code-workload` (num_workers=0) | 10 |
+| `efficient-workload` (num_workers=4) | 50 (5x) |
+
+**Tuning — increased matmul reps from 10 to 60 (2026-08-21)**: originally 10
+matmul reps took only 0.33s of compute — far shorter than Prometheus's 30s
+scrape interval, so the GPU_UTIL graph mostly read 0% for *both* workloads
+with only occasional lucky spikes (measured duty cycle: bad-code ~5%,
+efficient only ~16.5% — not "0% vs 100%," just two flavors of "mostly
+idle"). Bumping reps to 60 (compute time ~1.88s) pushed `efficient-workload`'s
+compute time past its 4-worker data-production time (~1.6s), making it
+genuinely **compute-bound** — and the measured graph pattern split cleanly:
+- `efficient-workload`: 4 consecutive samples (40s) all read 97-100%
+  GPU_UTIL — **continuously high, no gaps**
+- `bad-code-workload`: `100,100,100,0,0,0,100,100` — **clearly alternates
+  on and off**
+
+**How to read the graph (important)**: both workloads hit 100% during an
+actual compute burst — the peak value itself is the same. The signal to
+look for is **whether it drops to 0% in between** — bad code idles
+completely between bursts while waiting for the next batch, so the graph
+shows clear gaps; efficient has the next batch ready ahead of time, so it
+stays unbroken. The step-count throughput the script itself prints remains
+the most reliable number either way.
+
+**Note — GPU time-slicing was tried and reverted (2026-08-21)**: made the
+single physical GPU report as 2 schedulable `nvidia.com/gpu` units
+(`ClusterPolicy.spec.devicePlugin.config` -> `time-slicing-config`,
+`replicas: 2`) and got both pods genuinely `Running` at once (the 5x
+throughput gap held up fine). But Grafana's per-pod GPU_UTIL panel showed
+broken lines — measured directly: with 2 pods concurrently
+`Running`, only 1 DCGM series existed, with labels behaving unexpectedly.
+DCGM metrics like `DCGM_FI_DEV_GPU_UTIL` are per-device, not per-process, so
+when time-slicing lets multiple pods take turns on one physical GPU, DCGM
+can only attribute the metric to one pod per scrape, and it can flip
+between scrapes — a real observability limitation of time-slicing itself
+(no isolation, unlike MIG), not a misconfiguration here. Reverted
+(`ClusterPolicy.spec.devicePlugin.config` removed, node allocatable
+confirmed back to 1) since a clean sequential run makes for a better demo
+graph. Time-slicing itself still works fine on every GPU generation here
+(T4/A10G/L4, unlike MIG) and remains a valid option for a scenario that
+needs real concurrency but doesn't care about per-pod graph accuracy.
+
+**Final 3-way comparison (2026-08-21, measured from a real Grafana Tier2
+screenshot)**: ran all three scripts in sequence (`bad-code` ->
+`efficient` -> `more-efficient`) and watched "GPU Utilization per Pod",
+"GPU Memory Used per Pod", and "DataLoader Throughput (steps/sec)"
+together:
+
+![Scenario 5 result: Tier2 dashboard comparing GPU utilization, memory, and throughput across the bad-code/efficient/more-efficient workloads](image/scenario5-result.png)
+
+| Workload | GPU_UTIL pattern | Throughput (steps/sec) | GPU memory |
 |---|---|---|---|
-| `bad-code-workload` (num_workers=0) | 40 | **0%** | **0%** |
-| `efficient-workload` (num_workers=4) | 160 (4x) | **12%** | **5.25%** |
+| `bad-code-workload` (num_workers=0, matmul×10) | mostly 0%, one brief spike (~90%) | ~0.13–0.15 | ~380MB |
+| `efficient-workload` (num_workers=4, matmul×10) | alternates 0%↔100% (2 spikes) | ~0.5–0.65 | ~430MB |
+| `more-efficient-workload` (num_workers=4, matmul×60) | rises once, then **continuously 100%, no gaps** | ~0.35–0.55 | ~450MB |
 
-The 4x throughput gap translated directly into the utilization gap —
-`bad-code-workload` sat at effectively 0% GPU_UTIL/MEM_COPY_UTIL for the
-entire observation window, quantitatively confirming the doc's "an expensive
-GPU sitting idle" premise. (The doc's original wording assumes a "memory
-90%+, compute periodically 0%" pattern; measured here, memory activity drops
-to near-zero right alongside compute — but the core lesson, "bad code idles
-the GPU," holds all the same.)
+Split exactly as intended — bad-code is mostly idle, efficient spikes
+repeatedly (not yet fully continuous), more-efficient is unbroken once it
+ramps up.
+
+One interesting wrinkle: **raw throughput (steps/sec) for
+`more-efficient` is actually slightly lower than `efficient`'s.**
+`efficient` is bottlenecked by data production (~1.6s, the num_workers=4
+limit) since its compute (matmul×10, ~0.33s) finishes faster than that;
+`more-efficient` deliberately lengthened compute (matmul×60, ~1.88s) past
+that same data-production time, making **compute itself the bottleneck**
+instead. Making the graph look clean traded away some raw steps/sec — a
+real tradeoff the measurement makes visible rather than hiding. GPU memory
+sits in a similar ~380–450MB range for all three, which makes sense: the
+model (one 4096×4096 tensor) and batch size are identical, so memory usage
+doesn't depend on num_workers or matmul rep count.
 
 **Not done yet — PriorityClass downgrade + preemption**: showing the doc's
 "infra team response" (code-improvement request + PriorityClass downgrade to
@@ -641,109 +747,193 @@ Sources: [How to set up KServe autoscaling for vLLM with KEDA](https://developer
 
 ## Scenario 9 — KServe Serverless (Knative) + vLLM, Real Scale-to-Zero
 
-> **Status: design confirmed, implementation planned for tomorrow
-> (2026-08-20 — written right after Scenario 8 measured that the KEDA
-> approach can't wake up from zero on its own; this scenario serves the
-> same model through KServe's original Serverless/Knative mode to check
-> whether genuine request-triggered wake-from-zero actually works there).**
+> **Status: complete, measurement-validated (2026-08-21, built and verified
+> live on the sandbox623 cluster). Flips Scenario 8's measured limitation
+> (KEDA never wakes on a real request at 0 replicas) around, and confirms
+> whether Knative's Activator sitting in the request path actually solves
+> it.**
 
-**What it shows**: flips Scenario 8's honestly-documented limitation
-(replica 0 + a request in = KEDA never notices, and the request itself
-fails at DNS resolution) around, to check whether **Knative's Activator
-sitting in the request path** actually solves it. Same model
-(`Qwen/Qwen2.5-0.5B-Instruct`), same vLLM configuration, deployed both ways
-(RawDeployment+KEDA vs. Serverless+Knative) side by side — the point being
-this is the deployment mode KServe's scale-to-zero was actually designed
-around.
+**What it shows**: same model (`Qwen/Qwen2.5-0.5B-Instruct`), same vLLM
+config, deployed via Serverless+Knative to check whether **genuine
+request-triggered 0→1 wake** actually works — this is the deployment mode
+KServe's scale-to-zero was originally designed around.
 
-**Setup (planned)**:
-- Install the OpenShift Serverless Operator (Knative Serving) — giving up
-  the Service Mesh avoidance this time, since it's actually needed. Modern
-  Knative Serving can often run on a lighter networking layer like Kourier
-  without full Service Mesh, though — verify against this actual cluster
-  rather than assuming either way.
-- Deploy the InferenceService with `serving.kserve.io/deploymentMode:
-  Serverless` (instead of RawDeployment) — reusing everything already
-  confirmed working in Scenario 8 (`--enforce-eager`, 12Gi memory, same
-  model).
-- Autoscaling is handled by KServe's own Knative-based autoscaler — no KEDA,
-  no `autoscalerClass: external` annotation needed (Knative is the default).
+**Setup (as actually applied)**:
+- `OpenShift Serverless Operator` (`serverless-operator`, stable channel) +
+  `Red Hat OpenShift Service Mesh 2` (`servicemeshoperator`, stable
+  channel) — **Service Mesh turned out to be a hard requirement**: RHOAI's
+  `DSCInitialization` hardcodes the `ServiceMeshControlPlane` name/namespace
+  as `istio-system/data-science-smcp`; any other name silently produces
+  `KserveReady=False (ServiceMesh is not ready)`.
+- `ServiceMeshMemberRoll/default` listing `knative-serving` plus the
+  namespace hosting the InferenceService (`gpu-kserve-scenario-9`)
+- DataScienceCluster: `kserve.serving.managementState: Managed` — RHOAI's
+  own operator then creates the `KnativeServing` CR automatically
+- `InferenceService` with `serving.kserve.io/deploymentMode: Serverless`
+  and `minReplicas: 0` (instead of RawDeployment) — reusing everything
+  already confirmed in Scenario 8 (`--enforce-eager`, 12Gi memory, same
+  model). `ServingRuntime` is namespace-scoped, so it needed its own copy in
+  this namespace too.
 
-**To validate**: send a real inference request while at 0 replicas and
-confirm the Activator actually buffers it until a pod comes up, and that
-the response succeeds (even with some cold-start latency). Measure the
-cold-start latency and compare directly against Scenario 8 under the same
-conditions (same model, same hardware) — a table of: automatic 0→1?,
-request succeeds during cold start?, extra operators/complexity required.
+**Real problems hit (all a function of this being a small, first-time
+Knative-on-Service-Mesh install)**:
+1. Knative's default HA control plane (activator etc. want 2 replicas each)
+   had nowhere to schedule — needed one more worker node
+2. The Knative `Gateway` resource's selector (`knative: ingressgateway`)
+   didn't match the actual istio-ingressgateway pod's label (`istio:
+   ingressgateway`) — TLS SNI handshakes failed outright until the
+   Deployment got the matching label added
+3. `automountServiceAccountToken: false` (KServe's own default on the
+   InferenceService) starved the istio sidecar of the token it needs to
+   authenticate to istiod — fixed by switching the SMCP's identity type to
+   `ThirdParty` (its own dedicated bound token), since Knative's webhook
+   flatly rejects any attempt to override that field on a Revision
+4. Mesh-wide STRICT mTLS blocked Knative's own internal metrics scraping,
+   which silently prevented scale-down forever — fixed by switching to
+   PERMISSIVE
+5. Any control-plane pod (activator, autoscaler) that had already been
+   running before the above config changes stayed stuck in an
+   authentication-failure loop with the old sidecar config — required an
+   explicit `oc rollout restart` on each. **Lesson: changing Knative's
+   identity/mTLS settings after initial install requires restarting every
+   already-running control-plane component, not just applying the new
+   config.**
 
-**Harness implementation not written yet** — tomorrow. Whether Knative
-Serving needs full Service Mesh on this specific cluster is unconfirmed;
-verify first rather than assuming either way.
+**Measured results (1st pass — `hf://`, re-downloading from Hugging Face Hub
+on every cold start)**:
+| Metric | Value |
+|---|---|
+| Cold start (pod created → 3/3 Ready, model loaded) | ~70–110s |
+| Warm response time | 0.3–0.5s |
+| **Automatic 0→1 wake itself** | **Works** — the key difference from Scenario 8 |
+| **Success of the specific request that triggered the cold start** | **Usually fails** — something in the serving path (Activator/gateway) times out around ~60s, shorter than the actual model load time (70–110s), regardless of how long a timeout the client sets. A retry immediately after that failure succeeds instantly, since the pod kept starting in the background and is ready by then |
+
+**Improvement — PVC pre-caching**: found that the `storage-initializer` init
+container was re-fetching `hf://Qwen/Qwen2.5-0.5B-Instruct` into a pod-local
+`emptyDir` (gone the moment the pod is) on every single cold start →
+pre-downloaded the model once into a PVC (`gp3-csi`, `ReadWriteOnce`, 5Gi —
+RWX not needed since there's only one GPU node) and switched the
+InferenceService's `storageUri` from `hf://...` to
+`pvc://qwen-model-cache/`, so later cold starts mount the PVC directly with
+no network download at all.
+
+| Metric | Before (`hf://`) | After (`pvc://`) |
+|---|---|---|
+| Pod created → model ready (`Application startup complete`) | ~70–110s | **~49s** (measured: `01:00:35` → `01:01:24`) |
+| The request that triggered the cold start | usually fails, needs a retry | **succeeds** — real response in 50.47s, no retry needed |
+
+**Conclusion**: unlike Scenario 8, Knative Serverless **genuinely wakes up
+automatically from zero** — that's the real difference. Initially this
+wasn't *fast* (loading an LLM onto a GPU alone took 70–110s, longer than the
+serving path's own default timeout). **PVC pre-caching removed the
+redundant model re-download, which brought cold start down to ~49s — under
+that timeout wall — and the very request that triggers the wake now
+succeeds on its own, no retry needed.** ~50s is still slow for something a
+user is waiting on in real time, though, so client-side retry-with-backoff
+remains good practice as a safety net — consistent with Scenario 10's
+already-planned approach of showing the cold-start gap honestly instead of
+hiding it.
 
 ---
 
-## Scenario 10 — Monitoring a Scale-to-Zero Service
+## Scenario 10 — Monitoring a Scale-to-Zero Service (KEDA vs Knative)
 
-> **Status: design confirmed, depends on Scenario 8 being live first (2026-08-20).**
+> **Status: complete, both metrics and logging measurement-validated
+> (2026-08-21).**
 
-**What it shows**: scaling to zero raises a real question — if there's no
-pod, what exactly are you monitoring? And a real gap surfaced while building
-Scenario 8: unlike Knative's Serverless mode, which has an Activator sitting
-in the request path to buffer a request while a cold pod boots, our
-KEDA-based approach (chosen specifically to avoid a Service Mesh dependency)
-does **not** buffer anything — a request arriving while replicas=0 has
-nothing to receive it and simply fails. This scenario shows how to actually
-observe that honestly, using signals that don't depend on the pod being
-alive, rather than pretending it isn't a tradeoff.
+**What it shows**: with Scenario 8 (KEDA) and Scenario 9 (Knative) both idle
+at 0 replicas, what's actually observable side by side. Replica count needs
+to stay visible whether or not a pod exists, and the cold-start-triggering
+request itself needs to be shown honestly too — KEDA fails outright, Knative
+succeeds after a delay.
 
-**Monitoring layers (planned)**:
-1. **Replica count over time** — `kube_deployment_status_replicas{deployment="qwen-vllm-predictor"}`
-   (from kube-state-metrics, already scraped by OpenShift's own monitoring)
-   graphed on a new Grafana panel — this comes from the Deployment object's
-   status via the API server, so it works whether or not a pod currently
-   exists, and makes the 0↔1 transitions visible on a timeline.
-2. **KEDA's own trigger metric** — `keda-metrics-apiserver` exposes the
-   ScaledObject's current trigger value (e.g. queue depth) even at
-   replicas=0, so you can see the trigger climbing *before* KEDA actually
-   scales up — this is the signal that explains "why" a scale-up is about
-   to happen.
-3. **The cold-start gap, shown honestly** — send a request while replicas=0
-   and confirm what actually happens (connection refused / 5xx, not a
-   graceful queue) as a documented, demoed limitation of this approach
-   rather than a hidden one; discuss the standard mitigation (client-side
-   retry-with-backoff), since fixing it server-side would mean reintroducing
-   Knative's Activator (and Service Mesh) — the exact dependency this whole
-   design avoided.
-4. Once scaled up, vLLM's own Prometheus metrics (queue depth, latency,
-   tokens/sec) resume normally and are already wired into the existing
-   Thanos/Grafana stack.
+**Real problem hit — our standalone Prometheus wasn't seeing
+kube-state-metrics at all**: the existing Tier1 dashboard's "Estimated GPU
+Cost" panel used `kube_pod_container_resource_requests`, and it turned out
+to always be empty when actually queried — that panel had been silently
+broken from the start. Two causes:
+1. There was no ServiceMonitor scraping kube-state-metrics from our
+   standalone Prometheus at all → added one, but the platform's
+   kube-state-metrics sits behind kube-rbac-proxy on its `https-main` port,
+   so a plain scrape doesn't work — needed to bind `cluster-monitoring-view`
+   to the `gpu-alert-prometheus` ServiceAccount, create a token Secret for
+   it, and reference that via `authorization.credentials` on the endpoint.
+2. The Prometheus CR (`gpu-alert-prom`)'s `serviceMonitorSelector` was
+   pinned to `{matchLabels: {app: nvidia-dcgm-exporter}}`, so it silently
+   ignored the new ServiceMonitor entirely — had to widen it to `{}` (match
+   everything). Note: `oc patch --type=merge` with an empty `{}` does
+   **not** clear existing matchLabels (merge patches can't express
+   deletion) — needed `--type=json` with a `replace` op to actually take
+   effect.
+3. kube-state-metrics' own `namespace` label (its kube-rbac-proxy sidecar's
+   identity) collides with the workload's real `namespace` label; even with
+   `honorLabels: true` the conflicting label gets pushed to
+   **`exported_namespace`** instead of being overwritten cleanly (similar
+   symptom to the DCGM case, but not identical) — real queries need to
+   filter on `exported_namespace`, not `namespace`.
 
-**Logging — pods keep changing, so how do logs survive?**: the metrics
-above (1-4) live outside the pod (Prometheus/Thanos), so they survive
-restarts for free -- but **the pod's own logs are gone the moment the pod is
-deleted.** Showing that logs actually persist requires installing
-**OpenShift Logging (Loki-based)** so logs get shipped out before the pod
-dies:
-- **Object storage is required**: the current (Loki-based) OpenShift
-  Logging's `LokiStack` cannot run on a PVC alone -- it needs an S3-compatible
-  object store. This lab has no real S3, so **MinIO runs in-cluster** to
-  fill that role (the officially documented Red Hat approach for test/demo
-  environments without real cloud object storage).
-- **Setup (planned)**: MinIO (Deployment + PVC + Service, create a bucket)
-  → install the Loki Operator + Red Hat OpenShift Logging Operator → a
-  `LokiStack` CR pointing at MinIO's S3 endpoint/bucket/credentials (via a
-  Secret) → a `ClusterLogForwarder` shipping application logs (especially
-  from `gpu-kserve-scenario-8`) to the LokiStack.
-- **How to validate**: `qwen-vllm-predictor` logs a request → KEDA scales
-  to 0, deleting that pod → `oc logs` no longer shows anything, but **Loki
-  (via the OpenShift console's Observe → Logs, or a Loki datasource added to
-  the existing Grafana) still returns it, queried by the
-  `app=isvc.qwen-vllm-predictor` label** -- this is the scenario's core
-  proof point.
+**Monitoring layers (as actually built)**:
+1. **Replica count over time** — new "Scale-to-Zero Monitoring (Scenario
+   10)" row on the Tier1 Grafana dashboard, two panels:
+   `kube_deployment_status_replicas{exported_namespace="gpu-kserve-scenario-8", deployment="qwen-vllm-predictor"}` (KEDA) and
+   `kube_deployment_status_replicas{exported_namespace="gpu-kserve-scenario-9", deployment=~"qwen-vllm-serverless-predictor.*"}` (Knative) — works whether or not a pod currently exists.
+2. **The cold-start gap, shown honestly** —
+   `~/scenario10-scalezero-monitor-demo.sh` sends a real request to each,
+   measured live:
+   - KEDA (Scenario 8): `Could not resolve host` — fails at DNS resolution outright
+   - Knative (Scenario 9): succeeds after 51s with a real response
+     (`{"id":"cmpl-...","choices":[...]}`), no retry needed — thanks to
+     Scenario 9's PVC-caching fix, the very first request now succeeds
+   - The Knative side also demos `oc get pa -n gpu-kserve-scenario-9` live,
+     showing `DESIREDSCALE`/`ACTUALSCALE`/`REASON` transition in real time
+     (`NoTraffic` → `Queued` → ...)
+3. Knative's own control-plane metrics (activator/autoscaler `/metrics` on
+   port 9090) were attempted but are **still not working** — flipping
+   `config-observability`'s `metrics.backend-destination` from `none` to
+   `prometheus` and restarting activator/autoscaler didn't open the port at
+   all. This looks like something deeper than a simple config flag, so
+   pragmatically fell back to the already-proven kube-state-metrics signal
+   instead; Knative's native metrics remain a follow-up investigation.
 
-**Harness implementation not written yet** — needs Scenario 8's actual
-InferenceService/ScaledObject running first to build real dashboard panels,
-alerts, and the logging pipeline against, verified live rather than guessed.
+**Logging — complete, measurement-validated (2026-08-21)**: actually
+installed `./harness.sh openshift-logging` (MinIO + Loki Operator +
+LokiStack + ClusterLogForwarder) on this cluster, woke Scenario 9 to
+generate a real log line, let it scale back to 0 (pod deleted), and
+confirmed logs survive: `oc logs <the now-deleted pod>` returns `NotFound`,
+but the same logs are still returned from Loki by `kubernetes_pod_name` —
+this is the scenario's core proof point.
+
+Four real problems hit along the way (all fixed in `openshift-logging.sh`):
+1. **Operator channel names didn't match the docs** — neither
+   `loki-operator` nor `cluster-logging` has a `stable` channel. Worse, **the
+   same package name exposes different channels per catalog** — the
+   `community-operators` version of `loki-operator` only has `alpha`, while
+   the `redhat-operators` version (the one actually used) has
+   `stable-6.5`/`stable-6.6`. Querying `oc get packagemanifest <name>`
+   without pinning the catalog can silently show the wrong catalog's
+   channels — always confirm with `--field-selector` or
+   `-o custom-columns=...CATALOG:.status.catalogSource`.
+2. **No collector pod ever scheduled on the GPU node** — the
+   `nvidia.com/gpu:NoSchedule` taint isn't tolerated by the collector
+   DaemonSet by default, so every GPU workload's logs (Scenario 8, 9, all of
+   them) were never being collected at all. Fixed via
+   `ClusterLogForwarder.spec.collector.tolerations`.
+3. **LokiStack gateway TLS trust failure** — "self-signed certificate in
+   certificate chain". The `logging-loki-ca-bundle` ConfigMap looks like the
+   obvious fix but is actually the **wrong CA** (it holds Loki Operator's own
+   internal signing CA). The real gateway certificate
+   (`logging-loki-gateway-http`) is signed by **OpenShift's platform
+   service-ca**, so the correct reference is the standard
+   `openshift-service-ca.crt` ConfigMap that's auto-injected into every
+   namespace.
+4. **403 Forbidden on writes** — `collect-application-logs` only grants
+   permission to *read* node-local log files, not to *write* to the
+   LokiStack gateway. The actual write permission lives in a separate
+   ClusterRole, `logging-collector-logs-writer`
+   (`loki.grafana.com/application`, resourceName `logs`, verb `create`), and
+   **a ClusterRoleBinding alone wasn't enough** — a RoleBinding in the same
+   namespace (`openshift-logging`) was also required before it actually took
+   effect.
 
 ---
 

@@ -18,31 +18,11 @@
   },
   "panels": [
     {
-      "id": 1,
-      "title": "My Project GPU Quota (requests.nvidia.com/gpu: used / hard)",
-      "type": "bargauge",
-      "datasource": "${DS_THANOS}",
-      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 0 },
-      "fieldConfig": { "defaults": { "min": 0 } },
-      "targets": [
-        {
-          "expr": "kube_resourcequota{namespace=\"$namespace\", resource=\"requests.nvidia.com/gpu\", type=\"used\"}",
-          "legendFormat": "used",
-          "datasource": "${DS_THANOS}"
-        },
-        {
-          "expr": "kube_resourcequota{namespace=\"$namespace\", resource=\"requests.nvidia.com/gpu\", type=\"hard\"}",
-          "legendFormat": "quota (hard)",
-          "datasource": "${DS_THANOS}"
-        }
-      ]
-    },
-    {
       "id": 2,
       "title": "GPU Utilization per Pod",
       "type": "timeseries",
       "datasource": "${DS_THANOS}",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 } },
       "targets": [
         {
@@ -57,7 +37,7 @@
       "title": "GPU Memory Used per Pod",
       "type": "timeseries",
       "datasource": "${DS_THANOS}",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
       "fieldConfig": { "defaults": { "unit": "decmbytes" } },
       "targets": [
         {
@@ -68,23 +48,20 @@
       ]
     },
     {
-      "id": 4,
-      "title": "Stall Pattern: High Memory, Low Compute (Bad Code Detector)",
+      "id": 6,
+      "title": "DataLoader Throughput (steps/sec)",
       "type": "timeseries",
-      "datasource": "${DS_THANOS}",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
-      "description": "Scenario 3: GPU Memory util >= 90% while GPU_UTIL drops to 0 periodically indicates a data-loader bottleneck.",
-      "fieldConfig": { "defaults": { "unit": "percent" } },
+      "datasource": { "type": "prometheus", "uid": "gpu-alert-prom" },
+      "description": "App-level Prometheus counter (train_steps_total), exposed directly by the training script and read via rate() -- unlike DCGM's GPU_UTIL (an instantaneous gauge, noisy against the 30s scrape interval for short compute bursts), a counter+rate() gives an accurate throughput signal regardless of scrape timing. Scenario 5 (bad-code vs efficient DataLoader comparison). Uses the gpu-alert-prom datasource directly (our own standalone Prometheus) instead of DS_THANOS (the platform Thanos Querier) -- train_steps_total only exists in our own Prometheus, since it's scraped via a ServiceMonitor the platform's Thanos Querier has no knowledge of.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "min": 0 }
+      },
       "targets": [
         {
-          "expr": "DCGM_FI_DEV_MEM_COPY_UTIL{namespace=\"$namespace\"}",
-          "legendFormat": "{{pod}} mem_util",
-          "datasource": "${DS_THANOS}"
-        },
-        {
-          "expr": "DCGM_FI_DEV_GPU_UTIL{namespace=\"$namespace\"}",
-          "legendFormat": "{{pod}} gpu_util",
-          "datasource": "${DS_THANOS}"
+          "expr": "rate(train_steps_total{namespace=\"$namespace\"}[1m])",
+          "legendFormat": "{{pod}}",
+          "datasource": { "type": "prometheus", "uid": "gpu-alert-prom" }
         }
       ]
     },
@@ -93,12 +70,32 @@
       "title": "OOM / XID Events (this namespace)",
       "type": "table",
       "datasource": "${DS_THANOS}",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 16 },
       "targets": [
         {
           "expr": "DCGM_FI_DEV_XID_ERRORS{namespace=\"$namespace\"} != 0",
           "format": "table",
           "instant": true,
+          "datasource": "${DS_THANOS}"
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "title": "My Project GPU Quota (requests.nvidia.com/gpu: used / hard)",
+      "type": "bargauge",
+      "datasource": "${DS_THANOS}",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": { "defaults": { "min": 0 } },
+      "targets": [
+        {
+          "expr": "kube_resourcequota{namespace=\"$namespace\", resource=\"requests.nvidia.com/gpu\", type=\"used\"}",
+          "legendFormat": "used",
+          "datasource": "${DS_THANOS}"
+        },
+        {
+          "expr": "kube_resourcequota{namespace=\"$namespace\", resource=\"requests.nvidia.com/gpu\", type=\"hard\"}",
+          "legendFormat": "quota (hard)",
           "datasource": "${DS_THANOS}"
         }
       ]
