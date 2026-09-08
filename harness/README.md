@@ -41,6 +41,20 @@ cd harness
 ./harness.sh all
 ```
 
+### llm-d / MaaS testing — lives in a different repo
+
+This repo only stands up the **base cluster** (bastion, OpenShift, GPU
+nodes, RHOAI, monitoring/logging). Once RHOAI is up, RHOAI ships llm-d
+natively via KServe's `LLMInferenceService` CRD — no separate llm-d operator
+install needed. Everything specific to *testing* llm-d — MaaS/RHCL setup,
+model deployment, request tracing, and the data-parallelism/failure/latency
+scenario demos — lives in a separate harness in
+[jangminjun/monitoring-llmd-rhoai](https://github.com/jangminjun/monitoring-llmd-rhoai/tree/main/harness),
+which targets this cluster's bastion the same way this repo's `harness.sh`
+does. Point it at this cluster via `harness/config.env` there (`BASTION_IP`,
+`SSH_KEY_PATH`) — see that repo's `AGENT.md` for this cluster's connection
+details.
+
 Add more NVIDIA GPU flavors side by side by re-running `gpu-machineset` with a
 different type — `gpu-operator`'s ClusterPolicy covers every node
 cluster-wide, so it only needs to run once:
@@ -213,12 +227,29 @@ Found while running this end to end once; kept here so nobody re-debugs them:
   deployment mode needs both operators installed. `remote/rhoai.sh` sets
   `defaultDeploymentMode: RawDeployment` and `serving.managementState:
   Removed` so it comes up standalone.
-- **2 workers (m5.xlarge) isn't enough for RHOAI.** dashboard/kserve/
-  modelmeshserving pods sit `Pending` on CPU. `WORKER_REPLICAS` defaults to
-  `3` for this reason — if you still see `Pending` pods with `Insufficient
-  cpu` events, scale another per-AZ MachineSet in `openshift-machine-api`
-  (`oc get machineset -n openshift-machine-api`, then `oc scale machineset
-  <name> -n openshift-machine-api --replicas=1`) or bump `WORKER_TYPE`.
+- **`rhods-dashboard`'s pod does not fit on an m5.xlarge worker at all,
+  structurally — adding more m5.xlarge nodes never fixes it.** Confirmed
+  live (2026-09-08): RHOAI 3.4's dashboard pod has grown to 9 containers
+  (dashboard, kube-rbac-proxy, model-registry-ui, gen-ai-ui, maas-ui,
+  mlflow-ui, eval-hub-ui, automl-ui, autorag-ui), ~2.8 vCPU requested
+  total. m5.xlarge has only 3.5 allocatable vCPU, and DaemonSets (OVN,
+  multus, DCGM, ...) alone eat ~0.87 vCPU on every node — so even a
+  completely empty, freshly-joined m5.xlarge only has ~2.63 vCPU free,
+  under the 2.8 vCPU the pod needs. Scaled from 3 to 5 m5.xlarge workers
+  live and it stayed `Pending` the whole way. **`WORKER_TYPE` needs to be
+  at least `m5.2xlarge`** (8 vCPU) for this pod to schedule at all — more
+  `WORKER_REPLICAS` of the too-small type will not help. If you hit
+  `Pending` + `Insufficient cpu`, don't assume "one more node" fixes it —
+  check whether the pod's total request even fits *one* node's allocatable
+  minus observed DaemonSet overhead
+  (`oc describe node <name> | grep -A3 "Allocated resources"` on an
+  otherwise-empty node tells you the real per-node ceiling) before scaling
+  out. To add a bigger-instance worker pool without resizing the existing
+  MachineSets (which would replace running nodes), clone one
+  (`oc get machineset <name> -n openshift-machine-api -o json`, edit
+  `metadata.name` + both `machine.openshift.io/cluster-api-machineset`
+  labels + `spec.template.spec.providerSpec.value.instanceType`, `oc create -f -`)
+  rather than resizing in place.
 
 - **KMM operator also only supports `AllNamespaces`.** Same failure mode as
   NFD/GPU Operator above but in the opposite direction — its OperatorGroup

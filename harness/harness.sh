@@ -25,6 +25,12 @@
 #   dashboards                                  apply Tier1 (infra) / Tier2 (tenant) Grafana dashboards
 #   monitoring-all                                enable-monitoring + grafana + dcgm-alerts + dashboards
 #   openshift-logging                               MinIO + Loki Operator + LokiStack + ClusterLogForwarder (logs survive pod deletion)
+#
+# llm-d/MaaS testing (model deployment, tracing, scenarios 11-14) lives in a
+# separate harness in the monitoring-llmd-rhoai repo, not here -- this repo
+# only stands up the base cluster. See
+# https://github.com/jangminjun/monitoring-llmd-rhoai/tree/main/harness
+#
 #   scenario1-autoscale-demo                        2 training-job pods pinned to one GPU flavor -> MachineSet scale-out
 #   scenario1-autoscale-demo-stop                     delete the training-job demo pods
 #   scenario2-alert-demo                                gpu-burn pod in a demo namespace to exercise the overheat alert

@@ -49,6 +49,13 @@ metadata:
   namespace: ${MINIO_NAMESPACE}
 spec:
   replicas: 1
+  # RWO PVC below -- the default RollingUpdate strategy tries to schedule
+  # the new pod before the old one releases the volume, which fails with
+  # "Multi-Attach error ... Volume is already used by pod(s)" forever (hit
+  # this live 2026-09-08 the first time anything patched this Deployment
+  # post-creation, e.g. tracing.sh adding a bucket via `oc set env`).
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: minio
