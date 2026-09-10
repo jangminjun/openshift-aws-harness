@@ -35,25 +35,36 @@ cd harness
 ./harness.sh kubeconfig          # pull kubeconfig to ./state/<cluster>-kubeconfig
 ./harness.sh gpu-machineset      # clone a worker MachineSet onto a GPU instance type
 ./harness.sh gpu-operator        # install Node Feature Discovery + NVIDIA GPU Operator
-./harness.sh rhoai               # install OpenShift AI operator + DataScienceCluster
+./harness.sh rhoai               # install OpenShift AI operator only (channel RHOAI_CHANNEL, default stable-3.4)
+./harness.sh maas                # create the DataScienceCluster (with MaaS) + full MaaS stack -- run after `rhoai`
 
 # or run the whole thing end to end:
 ./harness.sh all
 ```
 
-### llm-d / MaaS testing — lives in a different repo
+### MaaS (Models-as-a-Service) — installed here; llm-d *testing* lives in a different repo
 
-This repo only stands up the **base cluster** (bastion, OpenShift, GPU
-nodes, RHOAI, monitoring/logging). Once RHOAI is up, RHOAI ships llm-d
-natively via KServe's `LLMInferenceService` CRD — no separate llm-d operator
-install needed. Everything specific to *testing* llm-d — MaaS/RHCL setup,
-model deployment, request tracing, and the data-parallelism/failure/latency
+This repo stands up the **base cluster plus MaaS** (bastion, OpenShift, GPU
+nodes, RHOAI, MaaS stack, monitoring/logging) via the `rhoai` + `maas`
+subcommands. `maas.sh` creates the DataScienceCluster with
+`kserve.modelsAsService: Managed` and installs the rest of the MaaS stack
+(RHCL/Kuadrant/Authorino/Limitador, Service Mesh 3, Gateway API, PostgreSQL,
+Redis-backed rate limiting) by delegating to
+[RHOAI-Toolkit](https://github.com/hyogrin/RHOAI-Toolkit)'s
+`install-rhoai-34.sh` rather than reimplementing that large, actively
+maintained installer here.
+
+Once RHOAI + MaaS are up, RHOAI ships llm-d natively via KServe's
+`LLMInferenceService` CRD — no separate llm-d operator install needed.
+Everything specific to *testing* llm-d on top of this cluster — model
+deployment, request tracing, and the data-parallelism/failure/latency
 scenario demos — lives in a separate harness in
 [jangminjun/monitoring-llmd-rhoai](https://github.com/jangminjun/monitoring-llmd-rhoai/tree/main/harness),
 which targets this cluster's bastion the same way this repo's `harness.sh`
-does. Point it at this cluster via `harness/config.env` there (`BASTION_IP`,
-`SSH_KEY_PATH`) — see that repo's `AGENT.md` for this cluster's connection
-details.
+does (it assumes MaaS is already installed here, it does not install MaaS
+itself). Point it at this cluster via `harness/config.env` there
+(`BASTION_IP`, `SSH_KEY_PATH`) — see that repo's `AGENT.md` for this
+cluster's connection details.
 
 Add more NVIDIA GPU flavors side by side by re-running `gpu-machineset` with a
 different type — `gpu-operator`'s ClusterPolicy covers every node
