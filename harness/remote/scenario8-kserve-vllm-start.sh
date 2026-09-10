@@ -29,7 +29,7 @@
 # newer --gpu-memory-utilization=0.4/--max-num-seqs=2 config; the real fix
 # was --swap-space=1, not a bigger limit):
 # - `storageUri: hf://...` needs a ClusterStorageContainer registering the
-#   `^hf://` regex -- none exists by default in RHOAI 2.25.8. Points at
+#   `^hf://` regex -- none exists by default in RHOAI 3.4. Points at
 #   RHOAI's own odh-kserve-storage-initializer-rhel9 image (already
 #   downstream-patched to understand hf://), not the upstream kserve image.
 # - CUDA graph capture hangs forever on this T4 node (0% GPU util, stuck

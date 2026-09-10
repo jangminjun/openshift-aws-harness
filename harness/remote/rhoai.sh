@@ -25,6 +25,11 @@ metadata:
   name: rhods-operator
   namespace: redhat-ods-operator
 spec:
+  # RHOAI_CHANNEL defaults to stable-3.4, not "stable" (which resolves to
+  # the 2.x line on this catalog) -- MaaS (kserve.modelsAsService) needs
+  # RHOAI 3.3+; 3.4.4 is the version this harness's MaaS tooling was
+  # verified against. RHOAI 2.x -> 3.x is not an in-place OLM upgrade path,
+  # so if 2.x is already installed, tear it down first (see harness README).
   channel: ${RHOAI_CHANNEL}
   installPlanApproval: Automatic
   name: rhods-operator
