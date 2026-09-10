@@ -18,7 +18,10 @@
 #   neuron-operator                     install KMM + AWS Neuron Operator + DeviceConfig
 #   cluster-autoscaler                    enable the cluster-wide ClusterAutoscaler (MAX_NODES_TOTAL)
 #   machine-autoscaler                      MachineAutoscaler for one MachineSet (MACHINESET_NAME/MIN_REPLICAS/MAX_REPLICAS)
-#   rhoai                              install OpenShift AI operator + DataScienceCluster
+#   rhoai                              install OpenShift AI operator only (channel RHOAI_CHANNEL, default stable-3.4)
+#   maas                                 create the DataScienceCluster (with MaaS) + full MaaS stack (RHCL/Kuadrant,
+#                                        Service Mesh 3, Gateway API, PostgreSQL, rate limiting) via RHOAI-Toolkit's
+#                                        install-rhoai-34.sh on the bastion -- run after `rhoai`
 #   enable-monitoring                    enable User Workload Monitoring + user Alertmanager config
 #   grafana                                install Grafana Operator + Thanos-querier datasource
 #   dcgm-alerts                              standalone Prometheus+Alertmanager for GPU temp/XID alerts -> Slack
@@ -55,7 +58,7 @@
 #   scenario9-serverless-stop                                                              delete the InferenceService/ServingRuntime/PVC/namespace
 #   scenario10-scalezero-monitor-demo                                          KEDA vs Knative side-by-side: request both at 0 replicas, compare
 #   push-scenario-scripts                     copy scenario1-4 convenience scripts to ~/ on the bastion
-#   all                                    full sequence: cluster+admin-user+g5/g6 GPU+RHOAI+monitoring+logging, end to end
+#   all                                    full sequence: cluster+admin-user+g5/g6 GPU+RHOAI+MaaS+monitoring+logging, end to end
 #   destroy-cluster                          openshift-install destroy cluster
 #   destroy-bastion --yes                      tear down bastion + its network (destructive)
 #
@@ -264,7 +267,15 @@ cmd_neuron_machineset() {
 cmd_neuron_operator() { ssh_bastion 'bash -s' < ./remote/neuron-operator.sh; }
 
 cmd_gpu_operator() { ssh_bastion 'bash -s' < ./remote/gpu-operator.sh; }
-cmd_rhoai()        { ssh_bastion 'bash -s' < ./remote/rhoai.sh; }
+cmd_rhoai() {
+  ssh_bastion "RHOAI_CHANNEL='${RHOAI_CHANNEL:-stable-3.4}' bash -s" < ./remote/rhoai.sh
+}
+
+cmd_maas() {
+  ssh_bastion "RHOAI_CHANNEL='${RHOAI_CHANNEL:-stable-3.4}' \
+    MAAS_TOOLKIT_REPO='${MAAS_TOOLKIT_REPO:-https://github.com/hyogrin/RHOAI-Toolkit.git}' \
+    MAAS_TOOLKIT_REF='${MAAS_TOOLKIT_REF:-}' bash -s" < ./remote/maas.sh
+}
 
 cmd_cluster_autoscaler() {
   ssh_bastion "MAX_NODES_TOTAL='${MAX_NODES_TOTAL:-20}' bash -s" < ./remote/cluster-autoscaler.sh
@@ -548,6 +559,7 @@ cmd_all() {
     cmd_gpu_machineset
   cmd_gpu_operator
   cmd_rhoai
+  cmd_maas
   cmd_monitoring_all
   cmd_openshift_logging
 }
@@ -569,6 +581,7 @@ case "$cmd" in
   cluster-autoscaler)                     cmd_cluster_autoscaler ;;
   machine-autoscaler)                       cmd_machine_autoscaler ;;
   rhoai)                              cmd_rhoai ;;
+  maas)                                cmd_maas ;;
   enable-monitoring)                    cmd_enable_monitoring ;;
   grafana)                                cmd_grafana ;;
   dcgm-alerts)                              cmd_dcgm_alerts ;;

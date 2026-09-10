@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # Runs ON the bastion, after the GPU operator is installed. Installs the
-# Red Hat OpenShift AI operator and stands up a default DataScienceCluster.
+# Red Hat OpenShift AI operator only -- the DataScienceCluster (including
+# MaaS) is created by `maas.sh`, not here, so there's exactly one place that
+# owns the DSC spec instead of two scripts fighting over it.
 set -euo pipefail
 export KUBECONFIG="$HOME/ocp-install/auth/kubeconfig"
 
-oc apply -f - <<'YAML'
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: redhat-ods-operator
----
+RHOAI_CHANNEL="${RHOAI_CHANNEL:-stable-3.4}"
+
+if oc get csv -n redhat-ods-operator 2>/dev/null | grep -qi rhods; then
+  echo "RHOAI operator already installed, skipping."
+else
+  oc create namespace redhat-ods-operator 2>/dev/null || true
+  oc apply -f - <<YAML
 apiVersion: operators.coreos.com/v1
 kind: OperatorGroup
 metadata:
@@ -22,49 +25,19 @@ metadata:
   name: rhods-operator
   namespace: redhat-ods-operator
 spec:
-  channel: stable
+  channel: ${RHOAI_CHANNEL}
+  installPlanApproval: Automatic
   name: rhods-operator
   source: redhat-operators
   sourceNamespace: openshift-marketplace
 YAML
 
-echo "Waiting for OpenShift AI operator CSV..."
-for _ in $(seq 1 60); do
-  oc get csv -n redhat-ods-operator 2>/dev/null | grep -qi succeeded && break
-  sleep 15
-done
+  echo "Waiting for OpenShift AI operator CSV (channel ${RHOAI_CHANNEL})..."
+  for _ in $(seq 1 60); do
+    oc get csv -n redhat-ods-operator 2>/dev/null | grep -qi succeeded && break
+    sleep 15
+  done
+fi
 
-oc apply -f - <<'YAML'
-apiVersion: dscinitialization.opendatahub.io/v1
-kind: DSCInitialization
-metadata:
-  name: default-dsci
-spec:
-  applicationsNamespace: redhat-ods-applications
-  monitoring:
-    managementState: Managed
-    namespace: redhat-ods-monitoring
----
-apiVersion: datasciencecluster.opendatahub.io/v1
-kind: DataScienceCluster
-metadata:
-  name: default-dsc
-spec:
-  components:
-    dashboard:
-      managementState: Managed
-    workbenches:
-      managementState: Managed
-    kserve:
-      managementState: Managed
-      defaultDeploymentMode: RawDeployment
-      serving:
-        managementState: Removed
-    modelmeshserving:
-      managementState: Managed
-    datasciencepipelines:
-      managementState: Managed
-YAML
-
-echo "OpenShift AI operator + DataScienceCluster submitted."
-echo "Dashboard route (once ready): oc get route -n redhat-ods-applications rhods-dashboard"
+echo "RHOAI operator installed on channel ${RHOAI_CHANNEL}."
+echo "Next: ./harness.sh maas   -- creates the DataScienceCluster (with MaaS) and the rest of the MaaS stack."

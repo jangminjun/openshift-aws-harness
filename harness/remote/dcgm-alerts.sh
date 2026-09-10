@@ -110,7 +110,7 @@ spec:
     # renamed to exported_namespace/exported_pod instead -- breaking every
     # per-pod/per-tenant panel and template variable that filters on
     # {namespace="..."}. Found missing here 2026-08-21 while debugging why
-    # Tier2's $namespace dropdown never offered demo namespaces: the
+    # Tier2's \$namespace dropdown never offered demo namespaces: the
     # ClusterPolicy-level honorLabels fix (spec.dcgmExporter.serviceMonitor.honorLabels)
     # only applies to the GPU Operator's OWN auto-generated ServiceMonitor
     # in nvidia-gpu-operator, which this standalone Prometheus doesn't even
