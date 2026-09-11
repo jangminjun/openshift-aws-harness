@@ -3,11 +3,11 @@
 # Creates the DataScienceCluster (with kserve.modelsAsService: Managed) and
 # the rest of the MaaS stack (RHCL/Kuadrant/Authorino/Limitador, Service
 # Mesh 3, Gateway API, PostgreSQL, Redis-backed rate limiting) by delegating
-# to RHOAI-Toolkit's install-rhoai-34.sh, which already handles all of that
+# to RHOAI-Toolkit's install-rhoai-35.sh, which already handles all of that
 # (idempotently, with its own retries) rather than reimplementing it here.
 #
 # Safe to re-run: clones-or-pulls the toolkit, patches modelsAsService onto a
-# pre-existing DSC that lacks it (so install-rhoai-34.sh's own
+# pre-existing DSC that lacks it (so install-rhoai-35.sh's own
 # create_datasciencecluster() -- which only acts when no DSC exists at all --
 # doesn't skip past a stale one), then runs the installer with flags matching
 # what this harness already did (RHOAI operator, NFD/GPU operator, node
@@ -15,7 +15,7 @@
 set -euo pipefail
 export KUBECONFIG="$HOME/ocp-install/auth/kubeconfig"
 
-RHOAI_CHANNEL="${RHOAI_CHANNEL:-stable-3.4}"
+RHOAI_CHANNEL="${RHOAI_CHANNEL:-stable-3.5}"
 MAAS_TOOLKIT_REPO="${MAAS_TOOLKIT_REPO:-https://github.com/hyogrin/RHOAI-Toolkit.git}"
 MAAS_TOOLKIT_REF="${MAAS_TOOLKIT_REF:-}"
 TOOLKIT_DIR="$HOME/RHOAI-Toolkit"
@@ -32,7 +32,7 @@ else
 fi
 
 # A DSC created by the old rhoai.sh (pre-MaaS, no modelsAsService field) or
-# any other non-3.4 source would make install-rhoai-34.sh's own
+# any other non-3.5 source would make install-rhoai-35.sh's own
 # create_datasciencecluster() skip past it entirely (it only acts when no DSC
 # exists at all) -- merge-patch modelsAsService onto it instead of deleting
 # it. A full delete+recreate was tried here initially and it briefly knocked
@@ -49,9 +49,9 @@ if oc get datasciencecluster default-dsc &>/dev/null; then
   fi
 fi
 
-echo "Running RHOAI-Toolkit install-rhoai-34.sh (channel ${RHOAI_CHANNEL})..."
+echo "Running RHOAI-Toolkit install-rhoai-35.sh (channel ${RHOAI_CHANNEL})..."
 cd "$TOOLKIT_DIR/scripts"
-chmod +x install-rhoai-34.sh
+chmod +x install-rhoai-35.sh
 # --skip-admin-user / --skip-node-scaling: this harness already created the
 # admin user (create-admin-user) and sized the cluster (config.env
 # WORKER_TYPE/WORKER_REPLICAS) -- don't let the toolkit second-guess either.
@@ -60,13 +60,13 @@ chmod +x install-rhoai-34.sh
 # own default non-interactively instead of dying on EOF under `set -e`.
 # `yes` itself always dies of SIGPIPE (128+13=141) once the installer stops
 # reading, and `pipefail` propagates that as the pipeline's status even when
-# install-rhoai-34.sh itself succeeded -- worse, `set -e` (active for this
+# install-rhoai-35.sh itself succeeded -- worse, `set -e` (active for this
 # whole script) would abort right at that pipeline before a later
 # `exit "${PIPESTATUS[1]}"` line ever ran. Disable errexit for just this one
-# command so it can't do that, then report install-rhoai-34.sh's own exit
+# command so it can't do that, then report install-rhoai-35.sh's own exit
 # code instead of the pipeline's.
 set +e
-yes "" | ./install-rhoai-34.sh --skip-admin-user --skip-node-scaling --channel "$RHOAI_CHANNEL"
+yes "" | ./install-rhoai-35.sh --skip-admin-user --skip-node-scaling --channel "$RHOAI_CHANNEL"
 status="${PIPESTATUS[1]}"
 set -e
 exit "$status"

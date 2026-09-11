@@ -35,7 +35,7 @@ cd harness
 ./harness.sh kubeconfig          # pull kubeconfig to ./state/<cluster>-kubeconfig
 ./harness.sh gpu-machineset      # clone a worker MachineSet onto a GPU instance type
 ./harness.sh gpu-operator        # install Node Feature Discovery + NVIDIA GPU Operator
-./harness.sh rhoai               # install OpenShift AI operator only (channel RHOAI_CHANNEL, default stable-3.4)
+./harness.sh rhoai               # install OpenShift AI operator only (channel RHOAI_CHANNEL, default stable-3.5)
 ./harness.sh maas                # create the DataScienceCluster (with MaaS) + full MaaS stack -- run after `rhoai`
 
 # or run the whole thing end to end:
@@ -51,7 +51,7 @@ subcommands. `maas.sh` creates the DataScienceCluster with
 (RHCL/Kuadrant/Authorino/Limitador, Service Mesh 3, Gateway API, PostgreSQL,
 Redis-backed rate limiting) by delegating to
 [RHOAI-Toolkit](https://github.com/hyogrin/RHOAI-Toolkit)'s
-`install-rhoai-34.sh` rather than reimplementing that large, actively
+`install-rhoai-35.sh` rather than reimplementing that large, actively
 maintained installer here.
 
 Once RHOAI + MaaS are up, RHOAI ships llm-d natively via KServe's

@@ -18,10 +18,10 @@
 #   neuron-operator                     install KMM + AWS Neuron Operator + DeviceConfig
 #   cluster-autoscaler                    enable the cluster-wide ClusterAutoscaler (MAX_NODES_TOTAL)
 #   machine-autoscaler                      MachineAutoscaler for one MachineSet (MACHINESET_NAME/MIN_REPLICAS/MAX_REPLICAS)
-#   rhoai                              install OpenShift AI operator only (channel RHOAI_CHANNEL, default stable-3.4)
+#   rhoai                              install OpenShift AI operator only (channel RHOAI_CHANNEL, default stable-3.5)
 #   maas                                 create the DataScienceCluster (with MaaS) + full MaaS stack (RHCL/Kuadrant,
 #                                        Service Mesh 3, Gateway API, PostgreSQL, rate limiting) via RHOAI-Toolkit's
-#                                        install-rhoai-34.sh on the bastion -- run after `rhoai`
+#                                        install-rhoai-35.sh on the bastion -- run after `rhoai`
 #   enable-monitoring                    enable User Workload Monitoring + user Alertmanager config
 #   grafana                                install Grafana Operator + Thanos-querier datasource
 #   dcgm-alerts                              standalone Prometheus+Alertmanager for GPU temp/XID alerts -> Slack
@@ -275,11 +275,11 @@ cmd_neuron_operator() { ssh_bastion 'bash -s' < ./remote/neuron-operator.sh; }
 
 cmd_gpu_operator() { ssh_bastion 'bash -s' < ./remote/gpu-operator.sh; }
 cmd_rhoai() {
-  ssh_bastion "RHOAI_CHANNEL='${RHOAI_CHANNEL:-stable-3.4}' bash -s" < ./remote/rhoai.sh
+  ssh_bastion "RHOAI_CHANNEL='${RHOAI_CHANNEL:-stable-3.5}' bash -s" < ./remote/rhoai.sh
 }
 
 cmd_maas() {
-  ssh_bastion "RHOAI_CHANNEL='${RHOAI_CHANNEL:-stable-3.4}' \
+  ssh_bastion "RHOAI_CHANNEL='${RHOAI_CHANNEL:-stable-3.5}' \
     MAAS_TOOLKIT_REPO='${MAAS_TOOLKIT_REPO:-https://github.com/hyogrin/RHOAI-Toolkit.git}' \
     MAAS_TOOLKIT_REF='${MAAS_TOOLKIT_REF:-}' bash -s" < ./remote/maas.sh
 }

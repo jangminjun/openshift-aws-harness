@@ -6,7 +6,7 @@
 set -euo pipefail
 export KUBECONFIG="$HOME/ocp-install/auth/kubeconfig"
 
-RHOAI_CHANNEL="${RHOAI_CHANNEL:-stable-3.4}"
+RHOAI_CHANNEL="${RHOAI_CHANNEL:-stable-3.5}"
 
 # OLM can't compute a channel switch across a major-version boundary (no
 # `replaces` chain links 2.x CSVs to 3.x ones) -- `oc patch subscription
@@ -42,9 +42,9 @@ metadata:
   name: rhods-operator
   namespace: redhat-ods-operator
 spec:
-  # RHOAI_CHANNEL defaults to stable-3.4, not "stable" (which resolves to
+  # RHOAI_CHANNEL defaults to stable-3.5, not "stable" (which resolves to
   # the 2.x line on this catalog) -- MaaS (kserve.modelsAsService) needs
-  # RHOAI 3.3+; 3.4.4 is the version this harness's MaaS tooling was
+  # RHOAI 3.3+; 3.5 is the version this harness's MaaS tooling was
   # verified against.
   channel: ${RHOAI_CHANNEL}
   installPlanApproval: Automatic
