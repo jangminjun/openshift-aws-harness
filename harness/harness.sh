@@ -60,10 +60,10 @@
 #   scenario8-kserve-vllm-start                                                           deploy Qwen2.5-0.5B via KServe+vLLM, KEDA ScaledObject (min=1,max=2)
 #   scenario8-kserve-vllm-load                                                              sustained concurrent load (CONCURRENCY/DURATION) -> real 1->2->1 scaling
 #   scenario8-kserve-vllm-stop                                                                delete the InferenceService/ServingRuntime/KEDA objects
-#   scenario9-serverless-start                                                          install Serverless+ServiceMesh, deploy Qwen2.5-0.5B via KServe Serverless (minReplicas=0, PVC-cached model)
-#   scenario9-serverless-load                                                            send a real completion request (real 0->1 wake-from-zero if idle)
-#   scenario9-serverless-stop                                                              delete the InferenceService/ServingRuntime/PVC/namespace
-#   scenario10-scalezero-monitor-demo                                          KEDA vs Knative side-by-side: request both at 0 replicas, compare
+#   scenario9-serverless-start        [DEPRECATED RHOAI 3.5+ -- Serverless removed] install Serverless+ServiceMesh, deploy Qwen2.5-0.5B via KServe Serverless (minReplicas=0, PVC-cached model)
+#   scenario9-serverless-load         [DEPRECATED RHOAI 3.5+]                       send a real completion request (real 0->1 wake-from-zero if idle)
+#   scenario9-serverless-stop        [DEPRECATED RHOAI 3.5+]                        delete the InferenceService/ServingRuntime/PVC/namespace
+#   scenario10-scalezero-monitor-demo [PARTIALLY DEPRECATED RHOAI 3.5+ -- needs scenario 9] KEDA vs Knative side-by-side: request both at 0 replicas, compare
 #   push-scenario-scripts                     copy scenario1-4 convenience scripts to ~/ on the bastion
 #   all                                    full sequence: cluster+admin-user+g5/g6 GPU+RHOAI+MaaS+monitoring+logging, end to end
 #   destroy-cluster                          openshift-install destroy cluster

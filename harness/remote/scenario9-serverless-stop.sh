@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# DEPRECATED (RHOAI 3.5+): companion to scenario9-serverless-start.sh, which
+# is itself deprecated -- OpenShift Serverless was removed in RHOAI 3.5.
+#
 # Cleans up scenario 9's namespace-scoped resources (InferenceService,
 # ServingRuntime, PVC, prefetch Job, namespace) and drops it from the
 # Service Mesh member roll. Leaves the cluster-wide infra installed by

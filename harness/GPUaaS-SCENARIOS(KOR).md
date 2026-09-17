@@ -800,12 +800,19 @@ Sources: [How to set up KServe autoscaling for vLLM with KEDA](https://developer
 
 ---
 
-## 시나리오 9 — KServe Serverless(Knative) + vLLM 진짜 Scale-to-Zero
+## 시나리오 9 — KServe Serverless(Knative) + vLLM 진짜 Scale-to-Zero ⚠️ DEPRECATED
 
-> **상태: 완료, 실측 검증됨 (2026-08-21, sandbox623 클러스터에서 라이브로
-> 구축·검증). 시나리오 8이 실측으로 확인한 한계(KEDA는 0에서 요청이 와도
-> 자동으로 못 깨어남)를 뒤집어서, Knative Activator가 요청 경로에 있으면
-> 실제로 되는지 검증 완료.**
+> **⚠️ DEPRECATED (RHOAI 3.5+): OpenShift Serverless(Knative)가 RHOAI 3.5에서
+> 제거됨 — 이 시나리오는 더 이상 RHOAI 3.5 기반 클러스터에서 재현 불가능하다.
+> 아래 내용은 RHOAI 2.x 시절(sandbox623, 2026-08-21) 실측 결과의 기록으로만
+> 남겨둔다. RHOAI 3.5의 KServe RawDeployment 경로에서 scale-to-zero가
+> 필요하면 KEDA(시나리오 8) 쪽 개선을 검토할 것 — Knative 기반 대안은 더
+> 이상 없다.**
+
+> **상태(기록용, RHOAI 2.x 기준): 완료, 실측 검증됨 (2026-08-21, sandbox623
+> 클러스터에서 라이브로 구축·검증). 시나리오 8이 실측으로 확인한 한계(KEDA는
+> 0에서 요청이 와도 자동으로 못 깨어남)를 뒤집어서, Knative Activator가
+> 요청 경로에 있으면 실제로 되는지 검증 완료.**
 
 **보여주는 것**: 같은 모델(`Qwen/Qwen2.5-0.5B-Instruct`)·같은 vLLM 설정을
 Serverless+Knative 모드로 배포해서, **진짜 요청 기반 0→1 자동 기동**이
@@ -948,9 +955,14 @@ InferenceService의 `storageUri`를 `hf://...` 대신 `pvc://qwen-model-cache/`
 
 ---
 
-## 시나리오 10 — Scale-to-Zero 상태의 모니터링 (KEDA vs Knative)
+## 시나리오 10 — Scale-to-Zero 상태의 모니터링 (KEDA vs Knative) ⚠️ 부분 DEPRECATED
 
-> **상태: 완료, 메트릭·로깅 둘 다 실측 검증됨 (2026-08-21).**
+> **⚠️ 부분 DEPRECATED (RHOAI 3.5+): 이 시나리오는 시나리오 9(Knative)가
+> 이미 떠있어야 동작하는데, 시나리오 9 자체가 RHOAI 3.5에서 Serverless
+> 제거로 재현 불가능해졌다. KEDA(시나리오 8) 쪽 관찰 내용만 유효하고,
+> Knative와의 비교 자체는 더 이상 재현 불가.**
+
+> **상태(기록용, RHOAI 2.x 기준): 완료, 메트릭·로깅 둘 다 실측 검증됨 (2026-08-21).**
 
 **보여주는 것**: 시나리오 8(KEDA)과 시나리오 9(Knative)가 둘 다 0
 replica로 idle한 상태에서, 각각 실제로 무엇이 관측 가능한지 나란히

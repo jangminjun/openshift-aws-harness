@@ -606,7 +606,12 @@ wake-from-zero가 필요하다면 시나리오 9의 아키텍처가 필요하다
 
 ---
 
-## 시나리오 9 — KServe Serverless(Knative) + vLLM 진짜 Scale-to-Zero
+## 시나리오 9 — KServe Serverless(Knative) + vLLM 진짜 Scale-to-Zero ⚠️ DEPRECATED
+
+> **⚠️ DEPRECATED (RHOAI 3.5+)**: OpenShift Serverless(Knative)가 RHOAI
+> 3.5에서 제거되어 이 시나리오는 RHOAI 3.5 클러스터에서 더 이상 재현할 수
+> 없습니다. 아래 내용은 RHOAI 2.x 시절 실측 결과입니다. Scale-to-zero가
+> 필요하면 KEDA 기반 시나리오 8을 참고하십시오.
 
 **목적**: 진짜 요청 기반 0→1 자동 기동(wake-from-zero)이 실제로
 되는지 증명한다 — 이것이 원래 KServe가 scale-to-zero를 하도록 설계된
@@ -708,7 +713,11 @@ spec:
 
 ---
 
-## 시나리오 10 — Scale-to-Zero 상태의 모니터링 (KEDA vs Knative)
+## 시나리오 10 — Scale-to-Zero 상태의 모니터링 (KEDA vs Knative) ⚠️ 부분 DEPRECATED
+
+> **⚠️ 부분 DEPRECATED (RHOAI 3.5+)**: 시나리오 9(Knative)가 RHOAI 3.5에서
+> 재현 불가능해짐에 따라, 이 시나리오의 KEDA-vs-Knative 비교 자체도 더 이상
+> 재현할 수 없습니다. KEDA(시나리오 8) 쪽 관측 내용만 유효합니다.
 
 **목적**: 0 replica로 idle한 상태에서도 "지금 무슨 일이 있는지"를 계속
 관측할 수 있어야 한다는 실전 요구를, 시나리오 8(KEDA)과 시나리오

@@ -846,13 +846,20 @@ Sources: [How to set up KServe autoscaling for vLLM with KEDA](https://developer
 
 ---
 
-## Scenario 9 — KServe Serverless (Knative) + vLLM, Real Scale-to-Zero
+## Scenario 9 — KServe Serverless (Knative) + vLLM, Real Scale-to-Zero ⚠️ DEPRECATED
 
-> **Status: complete, measurement-validated (2026-08-21, built and verified
-> live on the sandbox623 cluster). Flips Scenario 8's measured limitation
-> (KEDA never wakes on a real request at 0 replicas) around, and confirms
-> whether Knative's Activator sitting in the request path actually solves
-> it.**
+> **⚠️ DEPRECATED (RHOAI 3.5+): OpenShift Serverless (Knative) was removed in
+> RHOAI 3.5 — this scenario can no longer be reproduced on an RHOAI 3.5
+> cluster. What follows is kept only as a record of the RHOAI 2.x-era
+> (sandbox623, 2026-08-21) measured results. If scale-to-zero is still needed
+> on RHOAI 3.5's KServe RawDeployment path, look at improving KEDA
+> (Scenario 8) instead — there is no longer a Knative-based alternative.**
+
+> **Status (historical, RHOAI 2.x): complete, measurement-validated
+> (2026-08-21, built and verified live on the sandbox623 cluster). Flips
+> Scenario 8's measured limitation (KEDA never wakes on a real request at 0
+> replicas) around, and confirms whether Knative's Activator sitting in the
+> request path actually solves it.**
 
 **What it shows**: same model (`Qwen/Qwen2.5-0.5B-Instruct`), same vLLM
 config, deployed via Serverless+Knative to check whether **genuine
@@ -1016,10 +1023,16 @@ hiding it.
 
 ---
 
-## Scenario 10 — Monitoring a Scale-to-Zero Service (KEDA vs Knative)
+## Scenario 10 — Monitoring a Scale-to-Zero Service (KEDA vs Knative) ⚠️ PARTIALLY DEPRECATED
 
-> **Status: complete, both metrics and logging measurement-validated
-> (2026-08-21).**
+> **⚠️ Partially deprecated (RHOAI 3.5+): this scenario requires Scenario 9
+> (Knative) to already be running, and Scenario 9 itself can no longer be
+> reproduced on RHOAI 3.5 (Serverless removed). The KEDA-side observations
+> alone remain valid; the KEDA-vs-Knative comparison itself is no longer
+> reproducible.**
+
+> **Status (historical, RHOAI 2.x): complete, both metrics and logging
+> measurement-validated (2026-08-21).**
 
 **What it shows**: with Scenario 8 (KEDA) and Scenario 9 (Knative) both idle
 at 0 replicas, what's actually observable side by side. Replica count needs

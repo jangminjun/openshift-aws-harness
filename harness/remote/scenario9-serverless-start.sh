@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# DEPRECATED (RHOAI 3.5+): OpenShift Serverless (Knative) was removed in
+# RHOAI 3.5 -- this script can no longer be reproduced on an RHOAI 3.5
+# cluster. Kept only as a record of the RHOAI 2.x-era (sandbox623,
+# 2026-08-21) implementation. If scale-to-zero is still needed on RHOAI
+# 3.5's KServe RawDeployment path, look at improving KEDA (scenario 8)
+# instead -- there is no Knative-based alternative anymore.
+#
 # Scenario 9: KServe Serverless (Knative) + vLLM -- real request-triggered
 # scale-to-zero, unlike scenario 8's KEDA/RawDeployment approach which never
 # wakes automatically on real traffic. Installs OpenShift Serverless +

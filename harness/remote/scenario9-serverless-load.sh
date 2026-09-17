@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# DEPRECATED (RHOAI 3.5+): depends on scenario9-serverless-start.sh, which is
+# itself deprecated -- OpenShift Serverless was removed in RHOAI 3.5.
+#
 # Sends a real inference request to scenario 9's Serverless InferenceService
 # and times it. If idle (0 replicas), this is what triggers Knative's
 # Activator to wake a pod -- the PVC-cached model (~49s to load) keeps cold

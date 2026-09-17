@@ -15,7 +15,7 @@
 | ③ | Red Hat - Authorino Operator | 조건부(RHCL 경유) | ✅ 설치 (RHCL 의존성, `kuadrant-system`) | 구독명이 `authorino-operator-stable-redhat-operators-openshift-marketplace`처럼 OLM이 자동 생성한 이름으로 붙음 — 별도로 직접 구독을 만든 게 아니라 RHCL의 종속성 해석 결과. |
 | ③ | RHCL(Kuadrant) Operator | 조건부 | ✅ 설치 (`stable`, `openshift-operators`, Manual approval) | Limitador·DNS Operator도 같은 방식(RHCL 의존성)으로 함께 설치됨. |
 | ③ | Leader Worker Set Operator | 조건부 | ✅ 설치 (`stable-v1.0`, `openshift-lws-operator`) | 문서와 동일. |
-| ③ | OpenShift Serverless (Knative) | 선택, 3.x 기본 아님 | ❌ RHOAI/MaaS 경로에는 미설치 | 문서 설명대로 3.x 기본 단일모델(RawDeployment) 경로엔 불필요해서 MaaS 스택엔 없음. **단, 이 하네스의 시나리오 9는 별도 목적(KServe Serverless 데모)으로 Service Mesh 2.x + Serverless를 독립적으로 설치함** — RHOAI 3.5 MaaS 스택과는 무관한 별도 설치 경로. |
+| ③ | OpenShift Serverless (Knative) | 선택, 3.x 기본 아님 | ❌ **3.5부터 완전히 제거됨** | 문서 설명대로 3.x 기본 단일모델(RawDeployment) 경로엔 불필요해서 MaaS 스택엔 없음. **RHOAI 3.5에서는 아예 제거되어 설치 자체가 불가능** — 이 하네스의 시나리오 9(KServe Serverless 데모, Service Mesh 2.x + Serverless를 독립적으로 설치)와 그에 의존하는 시나리오 10은 RHOAI 3.5 클러스터에서 더 이상 재현 불가능(DEPRECATED 처리, `harness/GPUaaS-SCENARIOS(KOR/ENG).md`·`GPUaaS-Howto-with-Strategy.md`·`harness.sh`·`remote/scenario9-*.sh`·`remote/scenario10-*.sh`에 표시해둠). |
 | ④ | Red Hat build of Kueue | 조건부 | ✅ 설치 (`stable-v1.3`, `openshift-operators`) | 문서와 동일, 임베디드 Kueue 아니라 별도 Operator로 확인됨. |
 | ④ | JobSet Operator | 조건부 | ❌ 별도 구독 없음 | 문서 설명대로 Kueue 1.3에 통합돼서 별도 Operator 불필요 — 라이브 확인 결과 별도 subscription/CSV 없음. |
 | ④ | KubeRay / CodeFlare (컴포넌트) | 조건부(DSC 컴포넌트) | ❌ 미사용 | DSC의 `ray` 컴포넌트로 켜야 하는데, 이번 빌드는 기본 DSC 설정이라 비활성 상태. Operator 자체가 아니라 DSC 필드라 별도 반입 대상 아님. |
