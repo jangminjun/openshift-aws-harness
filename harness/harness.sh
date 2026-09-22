@@ -18,7 +18,10 @@
 #   neuron-operator                     install KMM + AWS Neuron Operator + DeviceConfig
 #   cluster-autoscaler                    enable the cluster-wide ClusterAutoscaler (MAX_NODES_TOTAL)
 #   machine-autoscaler                      MachineAutoscaler for one MachineSet (MACHINESET_NAME/MIN_REPLICAS/MAX_REPLICAS)
-#   rhoai                              install OpenShift AI operator + DataScienceCluster
+#   rhoai                              install OpenShift AI operator only (channel RHOAI_CHANNEL, default stable-3.5)
+#   maas                                 create the DataScienceCluster (with MaaS) + full MaaS stack (RHCL/Kuadrant,
+#                                        Service Mesh 3, Gateway API, PostgreSQL, rate limiting) via RHOAI-Toolkit's
+#                                        install-rhoai-35.sh on the bastion -- run after `rhoai`
 #   enable-monitoring                    enable User Workload Monitoring + user Alertmanager config
 #   grafana                                install Grafana Operator + Thanos-querier datasource
 #   dcgm-alerts                              standalone Prometheus+Alertmanager for GPU temp/XID alerts -> Slack
@@ -26,9 +29,10 @@
 #   monitoring-all                                enable-monitoring + grafana + dcgm-alerts + dashboards
 #   openshift-logging                               MinIO + Loki Operator + LokiStack + ClusterLogForwarder (logs survive pod deletion)
 #
-# llm-d/MaaS testing (model deployment, tracing, scenarios 11-14) lives in a
-# separate harness in the monitoring-llmd-rhoai repo, not here -- this repo
-# only stands up the base cluster. See
+# MaaS itself (`rhoai` + `maas` above) is installed by this repo. llm-d
+# *testing* on top of it (model deployment, tracing, scenarios 11-14) lives
+# in a separate harness in the monitoring-llmd-rhoai repo instead -- it
+# assumes MaaS is already up here, it does not install MaaS itself. See
 # https://github.com/jangminjun/monitoring-llmd-rhoai/tree/main/harness
 #
 #   scenario1-autoscale-demo                        2 training-job pods pinned to one GPU flavor -> MachineSet scale-out
@@ -56,12 +60,12 @@
 #   scenario8-kserve-vllm-start                                                           deploy Qwen2.5-0.5B via KServe+vLLM, KEDA ScaledObject (min=1,max=2)
 #   scenario8-kserve-vllm-load                                                              sustained concurrent load (CONCURRENCY/DURATION) -> real 1->2->1 scaling
 #   scenario8-kserve-vllm-stop                                                                delete the InferenceService/ServingRuntime/KEDA objects
-#   scenario9-serverless-start                                                          install Serverless+ServiceMesh, deploy Qwen2.5-0.5B via KServe Serverless (minReplicas=0, PVC-cached model)
-#   scenario9-serverless-load                                                            send a real completion request (real 0->1 wake-from-zero if idle)
-#   scenario9-serverless-stop                                                              delete the InferenceService/ServingRuntime/PVC/namespace
-#   scenario10-scalezero-monitor-demo                                          KEDA vs Knative side-by-side: request both at 0 replicas, compare
+#   scenario9-serverless-start        [DEPRECATED RHOAI 3.5+ -- Serverless removed] install Serverless+ServiceMesh, deploy Qwen2.5-0.5B via KServe Serverless (minReplicas=0, PVC-cached model)
+#   scenario9-serverless-load         [DEPRECATED RHOAI 3.5+]                       send a real completion request (real 0->1 wake-from-zero if idle)
+#   scenario9-serverless-stop        [DEPRECATED RHOAI 3.5+]                        delete the InferenceService/ServingRuntime/PVC/namespace
+#   scenario10-scalezero-monitor-demo [PARTIALLY DEPRECATED RHOAI 3.5+ -- needs scenario 9] KEDA vs Knative side-by-side: request both at 0 replicas, compare
 #   push-scenario-scripts                     copy scenario1-4 convenience scripts to ~/ on the bastion
-#   all                                    full sequence: cluster+admin-user+g5/g6 GPU+RHOAI+monitoring+logging, end to end
+#   all                                    full sequence: cluster+admin-user+g5/g6 GPU+RHOAI+MaaS+monitoring+logging, end to end
 #   destroy-cluster                          openshift-install destroy cluster
 #   destroy-bastion --yes                      tear down bastion + its network (destructive)
 #
@@ -283,7 +287,15 @@ cmd_neuron_machineset() {
 cmd_neuron_operator() { ssh_bastion 'bash -s' < ./remote/neuron-operator.sh; }
 
 cmd_gpu_operator() { ssh_bastion 'bash -s' < ./remote/gpu-operator.sh; }
-cmd_rhoai()        { ssh_bastion 'bash -s' < ./remote/rhoai.sh; }
+cmd_rhoai() {
+  ssh_bastion "RHOAI_CHANNEL='${RHOAI_CHANNEL:-stable-3.5}' bash -s" < ./remote/rhoai.sh
+}
+
+cmd_maas() {
+  ssh_bastion "RHOAI_CHANNEL='${RHOAI_CHANNEL:-stable-3.5}' \
+    MAAS_TOOLKIT_REPO='${MAAS_TOOLKIT_REPO:-https://github.com/hyogrin/RHOAI-Toolkit.git}' \
+    MAAS_TOOLKIT_REF='${MAAS_TOOLKIT_REF:-}' bash -s" < ./remote/maas.sh
+}
 
 cmd_cluster_autoscaler() {
   ssh_bastion "MAX_NODES_TOTAL='${MAX_NODES_TOTAL:-20}' bash -s" < ./remote/cluster-autoscaler.sh
@@ -567,6 +579,7 @@ cmd_all() {
     cmd_gpu_machineset
   cmd_gpu_operator
   cmd_rhoai
+  cmd_maas
   cmd_monitoring_all
   cmd_openshift_logging
 }
@@ -588,6 +601,7 @@ case "$cmd" in
   cluster-autoscaler)                     cmd_cluster_autoscaler ;;
   machine-autoscaler)                       cmd_machine_autoscaler ;;
   rhoai)                              cmd_rhoai ;;
+  maas)                                cmd_maas ;;
   enable-monitoring)                    cmd_enable_monitoring ;;
   grafana)                                cmd_grafana ;;
   dcgm-alerts)                              cmd_dcgm_alerts ;;

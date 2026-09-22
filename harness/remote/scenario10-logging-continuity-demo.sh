@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# DEPRECATED (RHOAI 3.5+): requires scenario 9 (Knative) to already be
+# deployed, and scenario 9 is itself deprecated -- OpenShift Serverless was
+# removed in RHOAI 3.5. No RawDeployment/KEDA equivalent has been written
+# for this logging-continuity check.
+#
 # Scenario 10 (logging half): proves logs stay continuous across a pod
 # being replaced, not just "survives one pod's death". Wakes scenario 9
 # TWICE (each wake creates a brand new pod once the previous one scales

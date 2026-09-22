@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# PARTIALLY DEPRECATED (RHOAI 3.5+): requires scenario 9 (Knative) to
+# already be deployed, and scenario 9 is itself deprecated -- OpenShift
+# Serverless was removed in RHOAI 3.5. The KEDA-side (scenario 8)
+# observations below remain valid; the KEDA-vs-Knative comparison itself is
+# no longer reproducible.
+#
 # Scenario 10: monitoring a scale-to-zero service. Contrasts what actually
 # happens when scenario 8 (KEDA/RawDeployment) and scenario 9 (Knative
 # Serverless) are both idle at 0 replicas and a real request comes in --
