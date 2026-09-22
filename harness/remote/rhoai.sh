@@ -22,12 +22,15 @@ metadata:
   name: rhods-operator
   namespace: redhat-ods-operator
 spec:
-  # Pinned to 3.4 (not "stable", which resolves to the 2.x line on this
-  # catalog) — llm-d (LLMInferenceService) and MaaS (modelsAsService) need
-  # RHOAI 3.3+; 3.4.4 is the version this harness's llm-d/MaaS tooling was
-  # verified against. RHOAI 2.x -> 3.x is not an in-place OLM upgrade path,
-  # so if 2.x is already installed, tear it down first (see harness README).
-  channel: stable-3.4
+  # Pinned to 3.5 (not "stable", which resolves to the 2.x line on this
+  # catalog) — RHOAI 3.5 is GA and adds the MaaS Governance features being
+  # tested against this cluster (external OIDC auth, OpenAI-compatible
+  # body-based model routing, unified Governance page, self-service
+  # Subscriptions tab). Confirmed available on this cluster's catalog via
+  # `oc get packagemanifest rhods-operator -o jsonpath='{.status.channels[*].name}'`.
+  # RHOAI 2.x -> 3.x is not an in-place OLM upgrade path, so if 2.x is
+  # already installed, tear it down first (see harness README).
+  channel: stable-3.5
   name: rhods-operator
   source: redhat-operators
   sourceNamespace: openshift-marketplace

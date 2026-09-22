@@ -77,12 +77,25 @@ cmd="${1:-}"; shift || true
 
 cmd_bastion_up() {
   load_state
-  aws ec2 describe-key-pairs --key-names "${CLUSTER_NAME}-bastion-key" --region "$AWS_REGION" >/dev/null 2>&1 || {
+  if aws ec2 describe-key-pairs --key-names "${CLUSTER_NAME}-bastion-key" --region "$AWS_REGION" >/dev/null 2>&1; then
+    # Key pair already registered in AWS — if we also have a local private key for
+    # this cluster, make sure it's actually the SAME key before trusting it. Whoever
+    # ran bastion-up first for this CLUSTER_NAME is the source of truth; a mismatch
+    # here means a different machine/session created this bastion, and SSH will fail
+    # later with no clue why unless we catch it now.
+    if [ -f "${SSH_KEY_PATH}.pub" ]; then
+      remote_key=$(aws ec2 describe-key-pairs --key-names "${CLUSTER_NAME}-bastion-key" --include-public-key \
+        --region "$AWS_REGION" --query 'KeyPairs[0].PublicKey' --output text)
+      local_key=$(awk '{print $1, $2}' "${SSH_KEY_PATH}.pub")
+      remote_key_norm=$(printf '%s' "$remote_key" | awk '{print $1, $2}')
+      [ "$local_key" = "$remote_key_norm" ] || err "AWS key pair '${CLUSTER_NAME}-bastion-key' does not match local ${SSH_KEY_PATH}.pub -- this bastion was almost certainly created from a different machine/session. Either copy that machine's private key to ${SSH_KEY_PATH}, or run './harness.sh destroy-bastion --yes' and re-run bastion-up from here so this machine's key becomes the source of truth."
+    fi
+  else
     [ -f "${SSH_KEY_PATH}" ] || { mkdir -p "$(dirname "$SSH_KEY_PATH")"; ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -C "${CLUSTER_NAME}-bastion" -q; }
     aws ec2 import-key-pair --key-name "${CLUSTER_NAME}-bastion-key" \
       --public-key-material "fileb://$(native_path "${SSH_KEY_PATH}.pub")" --region "$AWS_REGION" >/dev/null
     log "Imported key pair ${CLUSTER_NAME}-bastion-key"
-  }
+  fi
 
   if [ -z "${VPC_ID:-}" ] || ! aws ec2 describe-vpcs --vpc-ids "$VPC_ID" --region "$AWS_REGION" >/dev/null 2>&1; then
     VPC_ID=$(aws ec2 create-vpc --cidr-block "$VPC_CIDR" \
