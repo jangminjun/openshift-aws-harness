@@ -119,3 +119,40 @@ MaaS 설치 자체의 더 상세한 이슈는 `basic-demo/lessonlearn.md`도 참
   `openssl req -x509` 기본 동작을 믿지 말고, 반드시 `basicConstraints=
   CA:FALSE`와 `extendedKeyUsage=serverAuth`를 명시할 것 — 안 그러면
   "인증서가 있는데도 서버 인증서로 인식 안 되는" 헷갈리는 실패로 이어진다.
+
+## 6. (미해결, 2026-09-17) RHOAI 3.5 네이티브 `aigateway`(MaaS) 컴포넌트의
+   `maas-api`가 DB 시크릿 누락으로 CrashLoopBackOff — 내일 조사 예정
+
+- **현상**: sandbox2478 빌드에서 `oc get pods -A`로 보면
+  `redhat-ai-gateway-infra/maas-api-*`가 계속 `CrashLoopBackOff`.
+  `ai-gateway-operator`(`redhat-ods-applications`)와 `maas-controller`
+  (`redhat-ods-applications`)는 정상 `Running`. 로그:
+  ```
+  error: failed to load database URL: failed to read secret
+  redhat-ai-gateway-infra/maas-db-config: secrets "maas-db-config" not found
+  (ensure the secret exists before starting maas-api)
+  ```
+- **배경**: RHOAI 3.5의 `rhods-operator` CSV는 DSC에 `aigateway` 컴포넌트를
+  자체적으로 들고 있고(`relatedImages`에 `odh_maas_api_image`/
+  `odh_maas_controller_image`/`odh_ai_gateway_operator_image` 번들), 이
+  클러스터의 `default-dsc`는 이미
+  `aigateway.managementState=Managed` +
+  `aigateway.modelsAsAService.managementState=Managed`로 켜져 있어서
+  `ai-gateway-operator`/`maas-controller`/`maas-api` 파드 자체는
+  RHCL 오퍼레이터 설치와 무관하게 rhods-operator 혼자서 떠 있는 걸 확인함
+  (단, 정상 동작하려면 여전히 RHCL/Kuadrant의 Authorino·Gateway API 등
+  하부 인프라가 필요 — `install-rhoai-35.sh`가 `install_rhoai_operator`보다
+  먼저 `install_rhcl_operator`를 부르는 이유). `install-rhoai-35.sh`에도
+  본인이 이 순서 의존성을 알고 있다는 주석이 있음: *"MaaS DB + TLS setup -
+  must run after RHCL and gateway are created. DB secret must exist BEFORE
+  modelsAsService becomes Managed (or restart maas-api after)"*.
+- **추정 원인 (미확인)**: 이번 빌드에서 그 DB 시크릿(`maas-db-config`)이
+  `redhat-ai-gateway-infra` 네임스페이스에 아예 안 만들어졌거나, 다른
+  네임스페이스에 만들어진 뒤 `aigateway`/`modelsAsAService`가 먼저
+  Managed로 전환되면서 순서가 꼬인 것으로 보임 — 스크립트 어느 단계에서
+  실패/스킵됐는지는 아직 안 봄.
+- **다음 조사 방향 (내일)**: (1) `install-rhoai-35.sh`에서 DB 시크릿을
+  만드는 함수를 찾아 어느 네임스페이스/타이밍에 만드는지 확인, (2) 이번
+  빌드 로그에서 그 단계가 실제로 실행/성공했는지 확인, (3) 시크릿을 수동
+  생성 후 `maas-api` 재시작으로 임시 복구 가능한지 확인. **아직 해결 안
+  함** — 기록만 해두고 다음 세션에 이어서 볼 것.

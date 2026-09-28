@@ -69,4 +69,17 @@ set +e
 yes "" | ./install-rhoai-35.sh --skip-admin-user --skip-node-scaling --channel "$RHOAI_CHANNEL"
 status="${PIPESTATUS[1]}"
 set -e
+
+# install-rhoai-35.sh exports CLUSTER_DOMAIN with "apps." stripped, and its
+# setup-letsencrypt-tls.sh then issues the wildcard as *.<cluster>.<base>
+# instead of *.apps.<cluster>.<base> -- and makes it the default ingress
+# certificate, breaking console/OAuth (x509 mismatch, 2026-09-29). Add the
+# apps wildcard back; cert-manager reissues in ~1 min.
+APPS_DOMAIN=$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')
+if oc get certificate apps-wildcard-cert -n openshift-ingress &>/dev/null && \
+   ! oc get certificate apps-wildcard-cert -n openshift-ingress -o jsonpath='{.spec.dnsNames}' | grep -qF "\"*.${APPS_DOMAIN}\""; then
+  echo "Fixing apps-wildcard-cert dnsNames -> *.${APPS_DOMAIN}"
+  oc patch certificate apps-wildcard-cert -n openshift-ingress --type=merge \
+    -p "{\"spec\":{\"dnsNames\":[\"*.${APPS_DOMAIN}\",\"*.${APPS_DOMAIN#apps.}\"]}}"
+fi
 exit "$status"
