@@ -18,7 +18,7 @@ invoking `harness.sh`, e.g.:
 
 ```bash
 CLUSTER_NAME=demo2 AWS_REGION=us-west-2 BASE_DOMAIN=example.com \
-  GPU_INSTANCE_TYPE=g5.2xlarge ./harness.sh bastion-up
+  GPU_INSTANCE_TYPE=g5.24xlarge ./harness.sh bastion-up
 ```
 
 ## Usage
