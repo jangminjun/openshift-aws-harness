@@ -64,6 +64,9 @@
 #   scenario9-serverless-load         [DEPRECATED RHOAI 3.5+]                       send a real completion request (real 0->1 wake-from-zero if idle)
 #   scenario9-serverless-stop        [DEPRECATED RHOAI 3.5+]                        delete the InferenceService/ServingRuntime/PVC/namespace
 #   scenario10-scalezero-monitor-demo [PARTIALLY DEPRECATED RHOAI 3.5+ -- needs scenario 9] KEDA vs Knative side-by-side: request both at 0 replicas, compare
+#   gitops-operator                           install Red Hat OpenShift GitOps (ArgoCD) operator
+#   scenario12-kueue-gitops-demo                 Kueue workbench scheduling visibility + GitOps-managed queues (RHOAI 3.5 GA) -- run after gitops-operator
+#   scenario12-kueue-gitops-demo-stop              delete the Application/HardwareProfile/queues/demo namespace
 #   push-scenario-scripts                     copy scenario1-4 convenience scripts to ~/ on the bastion
 #   all                                    full sequence: cluster+admin-user+g5/g6 GPU+RHOAI+MaaS+monitoring+logging, end to end
 #   destroy-cluster                          openshift-install destroy cluster
@@ -491,6 +494,20 @@ cmd_scenario10_logging_continuity_demo() {
     < ./remote/scenario10-logging-continuity-demo.sh
 }
 
+cmd_gitops_operator() { ssh_bastion 'bash -s' < ./remote/gitops-operator.sh; }
+
+cmd_scenario12_kueue_gitops_demo() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-kueue-scenario-12}' \
+    GITOPS_REPO='${GITOPS_REPO:-https://github.com/jangminjun/openshift-aws-harness.git}' \
+    GITOPS_REVISION='${GITOPS_REVISION:-main}' bash -s" \
+    < ./remote/scenario12-kueue-gitops-demo.sh
+}
+
+cmd_scenario12_kueue_gitops_demo_stop() {
+  ssh_bastion "DEMO_NAMESPACE='${DEMO_NAMESPACE:-kueue-scenario-12}' bash -s" \
+    < ./remote/scenario12-kueue-gitops-demo-stop.sh
+}
+
 # Copies standalone convenience copies of the scenario scripts onto the
 # bastion under the exact names the SCENARIOS docs reference (e.g.
 # ~/scenario1-autoscale-start.sh), so a demo can run them directly over SSH
@@ -527,6 +544,8 @@ cmd_push_scenario_scripts() {
     "scenario9-serverless-stop.sh:scenario9-serverless-stop.sh"
     "scenario10-scalezero-monitor-demo.sh:scenario10-scalezero-monitor-demo.sh"
     "scenario10-logging-continuity-demo.sh:scenario10-logging-continuity-demo.sh"
+    "scenario12-kueue-gitops-demo.sh:scenario12-kueue-gitops-demo.sh"
+    "scenario12-kueue-gitops-demo-stop.sh:scenario12-kueue-gitops-demo-stop.sh"
   )
   local pair src dst
   for pair in "${pairs[@]}"; do
@@ -636,6 +655,9 @@ case "$cmd" in
   scenario9-serverless-stop)                                                               cmd_scenario9_serverless_stop ;;
   scenario10-scalezero-monitor-demo)                                        cmd_scenario10_scalezero_monitor_demo ;;
   scenario10-logging-continuity-demo)                                        cmd_scenario10_logging_continuity_demo ;;
+  gitops-operator)                                                           cmd_gitops_operator ;;
+  scenario12-kueue-gitops-demo)                                                     cmd_scenario12_kueue_gitops_demo ;;
+  scenario12-kueue-gitops-demo-stop)                                                cmd_scenario12_kueue_gitops_demo_stop ;;
   push-scenario-scripts)               cmd_push_scenario_scripts ;;
   destroy-cluster)                     cmd_destroy_cluster ;;
   destroy-bastion)                      cmd_destroy_bastion "$@" ;;

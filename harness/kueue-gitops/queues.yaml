@@ -1,0 +1,38 @@
+# GitOps-managed Kueue queue resources for scenario12 (RHOAI 3.5 GA:
+# "Kueue workbench scheduling visibility" + the autoCreateQueues=false
+# GitOps-management flag). Synced into the cluster by the ArgoCD
+# Application that `./harness.sh scenario12-kueue-gitops-demo` creates -- edit
+# this file and push, ArgoCD reconciles the live cluster (prune+selfHeal),
+# no `oc apply` needed on the cluster side.
+#
+# Nominal quota is deliberately tiny (cpu: 2, memory: 4Gi) so two small demo
+# workbenches contend for capacity: the second shows up as "Queued" on the
+# Workbenches tab's Status column instead of starting immediately.
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: demo-flavor
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: demo-cluster-queue
+spec:
+  namespaceSelector: {}
+  resourceGroups:
+  - coveredResources: ["cpu", "memory"]
+    flavors:
+    - name: demo-flavor
+      resources:
+      - name: "cpu"
+        nominalQuota: "2"
+      - name: "memory"
+        nominalQuota: "4Gi"
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: demo-local-queue
+  namespace: kueue-scenario-12
+spec:
+  clusterQueue: demo-cluster-queue
