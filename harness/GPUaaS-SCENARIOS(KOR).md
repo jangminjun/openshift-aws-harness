@@ -1123,6 +1123,89 @@ Sources: [Improve GPU utilization with Kueue in OpenShift AI](https://developers
 
 ---
 
+## 시나리오 12 — Kueue 워크벤치 스케줄링 가시성 + GitOps 큐 관리
+
+> **상태: harness 구현 완료, CRD 필드 sandbox2576 클러스터(RHOAI 3.5.1)에서
+> 실측 확인됨 (2026-10-01). `gitops-operator` 설치까지만 실행했고, 이
+> 세션에서는 전체 데모 플로우(워크벤치 2개로 대기열 시연)는 아직 안 돌림
+> — 다음 세션에서 이어서 검증할 것.**
+>
+> 시나리오 11(Kueue+DRA)과 번호가 겹치지 않도록 12번으로 분리함 — 11번은
+> DRA(`ResourceClaim`) 중심의 더 큰 계획이고, 이건 RHOAI 3.5 GA로 들어온
+> 대시보드 가시성 기능 + 그 전제조건인 Kueue 큐 리소스를 GitOps로 관리하는
+> 더 작고 바로 쓸 수 있는 데모.
+
+**보여주는 것**: RHOAI 3.5 릴리스 노트의 두 GA 기능을 하나의 데모로 묶는다.
+
+1. **워크벤치 스케줄링 가시성** — Kueue가 관리하는 프로젝트에서, 워크벤치
+   개요 페이지 Status 컬럼에 `Queued`/`Starting`/`Preempted`/`Evicted`/
+   `Requeued` 같은 Kueue 파생 상태가 그대로 보인다. 워크벤치 생성 시
+   `scheduling.type: Queue`로 설정된 HardwareProfile을 고르면, 그 뒤부터는
+   일반 스케줄러가 아니라 Kueue의 admission을 거쳐서 뜬다.
+2. **큐 리소스의 GitOps 관리** — `DataScienceCluster.spec.components.kueue.
+   autoCreateQueues`(boolean, 기본값 `false`)가 켜져 있으면 Operator가
+   기본 `ClusterQueue`/`LocalQueue`/`ResourceFlavor`를 자동 생성하고, 꺼져
+   있으면 Operator는 큐 생성을 건너뛰어서 ArgoCD 같은 외부 GitOps 툴이
+   전적으로 관리할 수 있게 비켜준다. 이 하네스로 만든 클러스터는 이미
+   기본값이 `false`라 GitOps 관리가 기본 전제다.
+
+**실제로 확인한 것 (sandbox2576, RHOAI 3.5.1)**: 필드명을 추측하지 않고
+클러스터의 실제 CRD에서 직접 확인함.
+
+```
+$ oc explain datasciencecluster.spec.components.kueue
+  autoCreateQueues    <boolean>   (기본값 false)
+  defaultClusterQueueName <string>
+  defaultLocalQueueName   <string>
+  managementState     <string>  enum: Managed, Unmanaged, Removed
+                                 (Managed는 OLM 호환용으로만 존재 -- 런타임엔
+                                 거부됨. 실제 "켜짐" 값은 Unmanaged)
+
+$ oc get datasciencecluster default-dsc -o jsonpath='{.spec.components.kueue}'
+  {"autoCreateQueues":false,"defaultClusterQueueName":"default",
+   "defaultLocalQueueName":"default","managementState":"Unmanaged"}
+
+$ oc explain hardwareprofile.spec.scheduling.kueue
+  localQueueName <string> -required-   # 워크벤치가 제출될 LocalQueue 이름
+```
+
+**구성 (harness 구현)**:
+1. `./harness.sh gitops-operator` — Red Hat OpenShift GitOps(ArgoCD) 설치,
+   기본 `openshift-gitops`/`openshift-gitops` 인스턴스가 자동 생성됨
+2. `./harness.sh scenario12-kueue-gitops-demo` —
+   - `kueue-scenario-12` 네임스페이스 생성 (`opendatahub.io/dashboard: "true"`
+     라벨로 Data Science Project로 인식되게 함)
+   - **ArgoCD `Application`**을 만들어 이 repo의
+     [`harness/kueue-gitops/queues.yaml`](../harness/kueue-gitops/queues.yaml)을
+     동기화 — `ResourceFlavor`/`ClusterQueue`/`LocalQueue`를 `oc apply`로
+     직접 만들지 않고 전부 GitOps로 전달하는 게 이 데모의 핵심. 쿼터는
+     일부러 작게(`cpu: 2`, `memory: 4Gi`) 잡아서 워크벤치 2개가 동시에
+     쿼터를 다투게 함
+   - `kueue-demo-profile` **HardwareProfile**(`redhat-ods-applications`)을
+     만들어 `scheduling.type: Queue` + `scheduling.kueue.localQueueName:
+     demo-local-queue`로 연결
+3. 데모 진행: `kueue-scenario-12` 프로젝트에서 `kueue-demo-profile`을 쓰는
+   워크벤치를 2개 만들면, 쿼터가 하나 분량뿐이라 두 번째가 Workbenches
+   탭에 `Queued`로 표시됨 → 첫 번째를 멈추면 `Starting`으로 전환
+4. `autoCreateQueues` 토글 데모: `true`로 바꿔 Operator가 기본 큐를
+   자동 생성하는 걸 보여준 뒤, 다시 `false`로 돌려서 제어권을 ArgoCD
+   Application에 돌려줌
+5. `./harness.sh scenario12-kueue-gitops-demo-stop` — Application/
+   HardwareProfile/큐/네임스페이스 정리 (ArgoCD는 Application이 삭제된
+   뒤엔 prune을 못 하므로 `ClusterQueue`/`ResourceFlavor`도 명시적으로 삭제)
+
+**주의할 점**:
+- ArgoCD `Application`이 GitHub origin(`jangminjun/openshift-aws-harness`)에서
+  직접 pull하기 때문에, `harness/kueue-gitops/queues.yaml`을 고치면 로컬
+  커밋만으론 반영 안 되고 **push까지 해야** ArgoCD가 동기화함
+- `LocalQueue`가 `kueue-scenario-12` 네임스페이스를 하드코딩하고 있어서,
+  그 네임스페이스는 ArgoCD Application보다 먼저 (harness 스크립트가 직접)
+  만들어야 함 — 안 그러면 동기화가 네임스페이스 없음으로 실패함
+
+Sources: [Red Hat OpenShift AI Self-Managed 3.5 Release notes — New features and enhancements](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.5/html/release_notes/new-features-and-enhancements_relnotes)
+
+---
+
 ## 미구현 시나리오 (참고용, `openshift-monitoring` 문서 원본 번호 기준)
 
 아래는 아직 harness에 자동화되어 있지 않은 시나리오들입니다. 감지 조건과
