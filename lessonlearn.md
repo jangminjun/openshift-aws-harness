@@ -221,3 +221,32 @@ MaaS 설치 자체의 더 상세한 이슈는 `basic-demo/lessonlearn.md`도 참
   맞으면 `aws service-quotas get-service-quota --service-code ec2
   --quota-code L-DB2E81BA`로 실제 한도를 보고 그 안에 맞는 타입/replica
   수로 `GPU_INSTANCE_TYPE`을 다시 잡을 것.
+
+## 9. `openshift-operators`가 Manual InstallPlan 승인 모드라 새 오퍼레이터
+   Subscription이 영원히 멈춰있음
+
+- **현상**: `gitops-operator`(신규 추가한 OpenShift GitOps 설치
+  서브커맨드)에서 `Subscription`을 만들었는데 CSV가 끝까지 안 생김 —
+  `oc get csv`에 아무것도 안 뜨고, `oc get argocd`는 CRD 자체가 없다고
+  나옴. 스크립트는 타임아웃 루프를 그냥 통과해버려서 겉보기엔 "설치됨"
+  메시지를 내놓고 끝남(종료 코드는 뒤의 `[ -n "$route_host" ] && echo`가
+  `set -e`에서 route_host가 빈 문자열일 때 비정상 종료 코드를 내는
+  별개의 버그로 1이 됨 — 이것도 같이 고침).
+- **원인**: `oc get installplan -n openshift-operators`로 보니
+  `openshift-gitops-operator.v1.22.0`의 InstallPlan이
+  `APPROVAL: Manual, APPROVED: false`로 그냥 대기 중이었음 — 이 클러스터의
+  `openshift-operators` OperatorGroup/네임스페이스가 Manual 승인 모드라서,
+  Subscription만 만들면 사람이(또는 스크립트가) 명시적으로 승인하기 전까진
+  설치가 절대 진행되지 않음. 같은 네임스페이스의 `servicemeshoperator3`/
+  `dns-operator` InstallPlan도 똑같이 Manual인데 `APPROVED: true`인 걸
+  보면, RHOAI-Toolkit의 `install-rhoai-35.sh`는 자기가 설치하는
+  오퍼레이터에 대해서만 이미 승인 처리를 해주고 있었던 것 — 이 하네스가
+  직접 만드는 새 오퍼레이터(GitOps 등)는 그 혜택을 못 받음.
+- **해결책**: `gitops-operator.sh`에 `oc get subscription ... -o
+  jsonpath='{.status.installplan.name}'`로 InstallPlan 이름을 찾아
+  `oc patch installplan <name> --type merge -p
+  '{"spec":{"approved":true}}'`로 자동 승인하는 단계를 Subscription 생성
+  직후에 추가. **교훈**: 이 하네스로 새 오퍼레이터 Subscription을 추가할
+  때마다, CSV가 안 뜨면 가장 먼저 `oc get installplan -n <ns>`로 Manual/
+  미승인 상태인지부터 확인할 것 — 조용히 영원히 대기하는 게 기본
+  실패 모드다.
