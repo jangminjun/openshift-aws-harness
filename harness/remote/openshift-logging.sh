@@ -66,7 +66,16 @@ spec:
     spec:
       containers:
       - name: minio
-        image: quay.io/minio/minio:latest
+        # quay.io/minio/minio (the legacy community image) started requiring
+        # auth / returning 401 Unauthorized some time around 2026-09-24 --
+        # MinIO privatized it after moving public distribution to the
+        # "aistor" rebrand, which in turn refuses all S3 operations without a
+        # paid license ("No valid license found, running in offline mode" --
+        # hit live on sandbox2576, 2026-10-01, readiness probe 503s forever).
+        # Chainguard's community build is the free, unlicensed, open-source
+        # MinIO server (same binary/env vars/API) and pulls anonymously from
+        # cgr.dev -- confirmed working live on sandbox2576, 2026-10-01.
+        image: cgr.dev/chainguard/minio:latest
         args: ["server", "/data", "--console-address", ":9090"]
         env:
         - name: MINIO_ROOT_USER
