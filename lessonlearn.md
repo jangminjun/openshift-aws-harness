@@ -154,5 +154,70 @@ MaaS 설치 자체의 더 상세한 이슈는 `basic-demo/lessonlearn.md`도 참
 - **다음 조사 방향 (내일)**: (1) `install-rhoai-35.sh`에서 DB 시크릿을
   만드는 함수를 찾아 어느 네임스페이스/타이밍에 만드는지 확인, (2) 이번
   빌드 로그에서 그 단계가 실제로 실행/성공했는지 확인, (3) 시크릿을 수동
-  생성 후 `maas-api` 재시작으로 임시 복구 가능한지 확인. **아직 해결 안
-  함** — 기록만 해두고 다음 세션에 이어서 볼 것.
+  생성 후 `maas-api` 재시작으로 임시 복구 가능한지 확인.
+- **해결 (2026-10-01, sandbox2576에서 재현 후 확인)**: 추정이 맞았음 —
+  `install-rhoai-35.sh`가 Postgres 인스턴스와 `maas-db-config` 시크릿을
+  둘 다 `redhat-ods-applications`에 만들어놓는데, `maas-api`는 자기
+  네임스페이스인 `redhat-ai-gateway-infra`에서 **같은 이름**의
+  시크릿/호스트를 찾는 네임스페이스 불일치 버그. 로그로 2단계가 순서대로
+  드러남: (1) 처음엔 `secrets "maas-db-config" not found` (시크릿 자체가
+  없음), (2) 시크릿을 `redhat-ai-gateway-infra`에 복제하고 나니 그 다음엔
+  `lookup postgres ... no such host` (시크릿 안의 `DB_CONNECTION_URL`이
+  bare hostname `postgres`라 Postgres Service가 실제로 있는
+  `redhat-ods-applications` 네임스페이스가 아니면 DNS가 안 풀림). **임시
+  복구**: `redhat-ods-applications`의 `maas-db-config` 시크릿 내용을
+  `redhat-ai-gateway-infra`에 동일 키로 재생성 + 그 네임스페이스에
+  `postgres` → `postgres.redhat-ods-applications.svc.cluster.local`
+  ExternalName Service 추가 + `maas-api` 재시작. **이 하네스 쪽 코드는
+  안 고침** — RHOAI-Toolkit(`hyogrin/RHOAI-Toolkit`)의 `install-rhoai-35.sh`
+  자체 버그라 외부 리포 수정 필요. 재빌드마다 매번 이 두 단계를 수동
+  반복해야 함 — 다음에 또 겪으면 `maas.sh`에 이 복구 단계를 자동으로
+  끼워 넣을지 검토할 것.
+
+## 7. `openshift-logging` 단계의 MinIO 이미지가 2026-09-24쯔음부터 pull 불가
+
+- **현상**: sandbox2576 빌드에서 `./harness.sh all`이 `openshift-logging`
+  단계까지 왔을 때 MinIO pod가 `ImagePullBackOff`:
+  `unable to pull image ... quay.io/minio/minio:latest ... unauthorized:
+  access to the requested resource is not authorized`.
+- **원인**: MinIO가 커뮤니티용 `quay.io/minio/minio`(그리고 Docker Hub의
+  `minio/minio`)를 비공개로 전환하고, 공개 배포를 "aistor" 상용 브랜드로
+  옮김 (`quay.io/api/v1/repository/minio/minio` 조회 결과 `Requires
+  authentication`). 대체 후보로 시도한 `quay.io/minio/aistor/minio`는
+  풀 자체는 되지만 **라이선스 없이는 기동하자마자 "No valid license found,
+  running in offline mode. All S3 operations are denied."**로 전체 S3
+  요청을 거부해서 못 씀 (실측 확인, 2026-10-01).
+- **해결책**: Chainguard가 유지하는 무료/오픈소스 MinIO 빌드
+  `cgr.dev/chainguard/minio:latest`로 교체 (`cgr.dev` 토큰 발급으로 익명
+  pull 가능함을 먼저 확인). 단, **기존 PVC에 `aistor` 이미지가 써놓은
+  `.minio.sys` 메타데이터가 남아있으면 커뮤니티 빌드가 그걸 못 읽고
+  `Unable to initialize backend: Storage resources are insufficient`를
+  무한 반복**하면서 readiness probe는 멀쩡히 200을 반환하는 혼란스러운
+  상태가 됨(겉보기엔 Ready인데 S3 백엔드는 죽어있음) — PVC를 지우고
+  처음부터 새로 포맷하게 하면 해결됨. `harness/remote/openshift-logging.sh`
+  수정 완료, 다음 빌드부터는 자동으로 올바른 이미지로 뜸.
+
+## 8. 신규 sandbox 계정의 AWS "G and VT" 인스턴스 vCPU 쿼터가 4로 고정
+
+- **현상**: sandbox2576에서 `gpu-machineset`으로 기본 플레이버
+  (`g5.24xlarge`, 96 vCPU)와 powercap 플레이버(`g6.2xlarge`, 8 vCPU)를
+  만들었는데 둘 다 Machine `Phase: Failed`:
+  `error launching instance: You have requested more vCPU capacity than
+  your current vCPU limit of 4 allows for the instance bucket ...`.
+- **원인**: `aws service-quotas get-service-quota --service-code ec2
+  --quota-code L-DB2E81BA`(Running On-Demand G and VT instances)로 확인한
+  결과 이 sandbox 계정은 쿼터가 **4 vCPU**뿐임 — 이전 sandbox들(기본
+  g5.2xlarge+g6.2xlarge=16 vCPU 조합이 멀쩡히 됐던)보다 훨씬 낮음. sandbox
+  계정마다 이 쿼터가 다를 수 있다는 뜻 — 매 빌드마다 당연히 될 거라고
+  가정하면 안 됨.
+- **해결책**: 실패한 MachineSet/MachineAutoscaler 2개를 지우고, 쿼터
+  안에 꼭 맞는 `g5.xlarge`(4 vCPU, A10G 1장) 하나만
+  `GPU_REPLICAS=1 GPU_MIN_REPLICAS=1 GPU_MAX_REPLICAS=1`로 재생성 —
+  2개 이상이나 더 큰 타입은 애초에 이 쿼터로는 불가능하므로 autoscaler
+  상한을 1로 묶어서 재시도 폭주를 막음. **harness 코드 자체는 안 고침**
+  (쿼터가 계정마다 달라서 기본값을 낮추는 게 항상 맞는 답은 아님) — 새
+  sandbox에서 GPU MachineSet이 `Failed`로 멈추면 가장 먼저
+  `oc describe machine <실패한 것>`으로 vCPU 쿼터 에러인지 확인하고,
+  맞으면 `aws service-quotas get-service-quota --service-code ec2
+  --quota-code L-DB2E81BA`로 실제 한도를 보고 그 안에 맞는 타입/replica
+  수로 `GPU_INSTANCE_TYPE`을 다시 잡을 것.
