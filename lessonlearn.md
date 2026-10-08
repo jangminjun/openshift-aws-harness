@@ -171,8 +171,13 @@ MaaS 설치 자체의 더 상세한 이슈는 `basic-demo/lessonlearn.md`도 참
   ExternalName Service 추가 + `maas-api` 재시작. **이 하네스 쪽 코드는
   안 고침** — RHOAI-Toolkit(`hyogrin/RHOAI-Toolkit`)의 `install-rhoai-35.sh`
   자체 버그라 외부 리포 수정 필요. 재빌드마다 매번 이 두 단계를 수동
-  반복해야 함 — 다음에 또 겪으면 `maas.sh`에 이 복구 단계를 자동으로
-  끼워 넣을지 검토할 것.
+  반복해야 함.
+- **재발 확인 (sandbox5408, 2026-10-08)**: 똑같은 증상/원인으로 다시
+  발생, 똑같은 복구 절차로 해결됨 — 매 sandbox 재빌드마다 거의 확실히
+  겪는 문제로 확인됨 (sandbox49는 확인 안 했지만 2576/5408 둘 다 재현).
+  **다음엔 `maas.sh`(또는 `cmd_maas`)에 이 복구 단계를 `install-rhoai-35.sh`
+  실행 직후 자동으로 끼워 넣는 걸 실제로 구현할 것** — 매번 수동으로
+  반복하기엔 패턴이 너무 확실해짐.
 
 ## 7. `openshift-logging` 단계의 MinIO 이미지가 2026-09-24쯔음부터 pull 불가
 
