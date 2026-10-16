@@ -13,6 +13,8 @@
 #   status                    show bastion + cluster status
 #   kubeconfig                  fetch kubeconfig to ./harness/state/<cluster>-kubeconfig
 #   gpu-machineset                add a GPU worker MachineSet
+#   node-pools                      create router/infra/oai 1-node MachineSets + label existing cpu-worker/gpu-worker nodes
+#   node-placement                    pin router/infra/oai workloads onto those pools (run after node-pools + rhoai/maas/monitoring-all/openshift-logging)
 #   gpu-operator                    install NFD + NVIDIA GPU Operator
 #   neuron-machineset                 add an AWS Neuron (Inferentia2/Trainium) worker MachineSet
 #   neuron-operator                     install KMM + AWS Neuron Operator + DeviceConfig
@@ -280,6 +282,16 @@ cmd_gpu_machineset() {
     GPU_MACHINESET_AZ='$GPU_MACHINESET_AZ' GPU_MIN_REPLICAS='$GPU_MIN_REPLICAS' \
     GPU_MAX_REPLICAS='$GPU_MAX_REPLICAS' MAX_NODES_TOTAL='$MAX_NODES_TOTAL' \
     bash -s" < ./remote/gpu-machineset.sh
+}
+
+cmd_node_pools() {
+  ssh_bastion "NODE_POOL_INSTANCE_TYPE='$NODE_POOL_INSTANCE_TYPE' NODE_POOL_AZ='$NODE_POOL_AZ' \
+    bash -s" < ./remote/node-pools.sh
+}
+
+cmd_node_placement() {
+  ssh_bastion "MONITORING_NAMESPACE='$MONITORING_NAMESPACE' LOGGING_NAMESPACE='${LOGGING_NAMESPACE:-openshift-logging}' \
+    OAI_NAMESPACES='${OAI_NAMESPACES:-}' bash -s" < ./remote/node-placement.sh
 }
 
 cmd_neuron_machineset() {
@@ -614,6 +626,8 @@ case "$cmd" in
   status)                     cmd_status ;;
   kubeconfig)                  cmd_kubeconfig ;;
   gpu-machineset)                cmd_gpu_machineset ;;
+  node-pools)                      cmd_node_pools ;;
+  node-placement)                    cmd_node_placement ;;
   gpu-operator)                     cmd_gpu_operator ;;
   neuron-machineset)                  cmd_neuron_machineset ;;
   neuron-operator)                      cmd_neuron_operator ;;

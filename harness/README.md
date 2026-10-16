@@ -42,6 +42,25 @@ cd harness
 ./harness.sh all
 ```
 
+### Node pools (router / infra / oai / cpu-worker / gpu-worker)
+
+Not part of `all` -- opt in once the base cluster (and whatever of
+GPU/RHOAI/MaaS/monitoring/logging you want) is up:
+
+```bash
+./harness.sh node-pools      # create 1-node router/infra/oai MachineSets (m5.xlarge),
+                              # label existing plain-worker/GPU nodes as cpu-worker/gpu-worker
+# ... run gpu-machineset / rhoai / maas / monitoring-all / openshift-logging here if not already done ...
+./harness.sh node-placement  # pin router/monitoring/logging workloads onto router/infra,
+                              # best-effort pin RHOAI/MaaS operator pods onto oai
+```
+
+`node-placement` patches objects `rhoai`/`maas`/`monitoring-all`/
+`openshift-logging` create, so it must run after those (and after
+`node-pools`, since the target nodes have to exist first). The `oai`
+placement is a first pass tracked as uncertain in `lessonlearn.md` --
+always follow it with `oc get pods -A -o wide` and fix stragglers.
+
 ### MaaS (Models-as-a-Service) — installed here; llm-d *testing* lives in a different repo
 
 This repo stands up the **base cluster plus MaaS** (bastion, OpenShift, GPU

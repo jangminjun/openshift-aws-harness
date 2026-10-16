@@ -69,6 +69,7 @@ oc get "$TEMPLATE" -n openshift-machine-api -o json \
     | .spec.selector.matchLabels["machine.openshift.io/cluster-api-machineset"] = $name
     | .spec.template.metadata.labels["machine.openshift.io/cluster-api-machineset"] = $name
     | .spec.template.spec.providerSpec.value.instanceType = $itype
+    | .spec.template.spec.metadata.labels["node-role.kubernetes.io/gpu-worker"] = ""
     | .spec.template.spec.taints = [{"key":"nvidia.com/gpu","value":"","effect":"NoSchedule"}]
     | del(.metadata.uid, .metadata.resourceVersion, .metadata.creationTimestamp, .metadata.generation, .status)
   ' | oc create -f -
