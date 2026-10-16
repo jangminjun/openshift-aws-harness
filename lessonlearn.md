@@ -255,3 +255,63 @@ MaaS 설치 자체의 더 상세한 이슈는 `basic-demo/lessonlearn.md`도 참
   때마다, CSV가 안 뜨면 가장 먼저 `oc get installplan -n <ns>`로 Manual/
   미승인 상태인지부터 확인할 것 — 조용히 영원히 대기하는 게 기본
   실패 모드다.
+
+## 10. router/infra/oai 1-노드 풀에 2-replica/다른-AZ 컴포넌트를 강제로 옮기면
+    영구히 Pending — sandbox1414에서 `node-pools`/`node-placement` 첫 라이브
+    검증 (2026-10-16)
+
+- **배경**: 사용자가 요청한 5-way 노드 분리(router/infra/oai/cpu-worker/
+  gpu-worker)를 `node-pools`(MachineSet 생성)+`node-placement`(컴포넌트를
+  거기로 옮기는 nodeSelector/toleration 패치)로 구현. router/infra/oai는
+  각 1대(`m5.xlarge`)로만 만들기로 결정함 — 바로 이 "1대뿐"이라는 제약이
+  아래 세 가지 문제의 공통 원인.
+- **문제 1 — IngressController 기본 2 replica + anti-affinity**: 라우터
+  노드가 1대뿐인데 `router-default`는 기본 2 replica(서로 다른 노드에
+  배치하는 anti-affinity 포함)라서 2번째 pod가 영원히 `Pending`
+  (`didn't match pod anti-affinity rules`). **해결**: `IngressController`에
+  `spec.replicas: 1`도 같이 패치.
+- **문제 2 — 기존 PVC의 AZ가 새 노드의 AZ와 다르면 영구 Pending**: Grafana
+  (`gpu-grafana-data`)와 LokiStack의 compactor/index-gateway
+  (`storage-logging-loki-{compactor,index-gateway}-0`) 전부, PVC가 **원래
+  떠 있던 worker 노드가 우연히 속했던 AZ**로 고정된 EBS 볼륨이라서, infra
+  노드(`NODE_POOL_AZ`, 기본 us-east-1a)와 다른 AZ면
+  `didn't match PersistentVolume's node affinity`로 영구히 못 뜸. 노드
+  재배치 자체는 정상 동작했는데 **기존에 이미 프로비저닝된 PV의 AZ만
+  문제**였던 것 — 즉 "클러스터를 막 설치한 직후"가 아니라 "이미 데이터가
+  있는 상태에서 노드를 옮기는" 모든 상황에서 재발 가능. **해결**: 해당
+  PVC를 삭제 후 재생성(StorageClass가 `WaitForFirstConsumer`라서, pod가
+  새 노드에 스케줄된 뒤에야 바인딩되므로 자연히 올바른 AZ에 재프로비저닝
+  됨) — Grafana 쪽 대시보드/설정 DB 유실은 `GrafanaDashboard`/
+  `GrafanaDatasource` CR이 선언적으로 재적용되므로 문제 없음.
+- **문제 3 — UWM Prometheus는 2 replica 강제, override 불가**:
+  `user-workload-monitoring-config` ConfigMap에 `prometheus.replicas: 1`을
+  넣었더니 **admission webhook이 그 필드 자체를 모른다며 거부**
+  (`unknown field "prometheus.replicas"`) — CMO가 UWM Prometheus의 replica
+  수를 아예 설정 불가능한 값으로 하드코딩해둔 것으로 보임. 1대짜리 infra
+  풀로는 구조적으로 못 옮김. **해결**: `prometheus`/`alertmanager` 키를
+  아예 빼고 `prometheusOperator`(1-replica Deployment라 문제 없음)만
+  patch — UWM Alertmanager는 이 하네스 설정으로는 애초에 안 떠 있어서
+  (`enableUserAlertmanagerConfig`는 플랫폼 alertmanager-main의 라우팅만
+  켜는 것) 옮길 대상 자체가 없었음.
+- **문제 4 (해결 안 함, 알아만 둘 것) — Kueue는 operator pod와 operand가
+  분리**: `openshift-operators/kueue-operator` Subscription을 patch하면
+  **operator 자신**(`openshift-kueue-operator` pod)은 oai 노드로 잘
+  옮겨가지만, 그게 만드는 **실제 워크로드 컨트롤러**
+  (`kueue-controller-manager`)는 별도 Deployment라 Subscription
+  nodeSelector의 영향을 안 받고 cpu-worker에 그대로 남음. 데모에서 Kueue
+  컨트롤러 자체의 위치가 중요해지면 그 Deployment를 직접 찾아 patch해야 함
+  (아직 안 함).
+- **OAI 컴포넌트의 실제 위치 (추측이 틀렸던 부분, 확인 완료)**: RHOAI-Toolkit의
+  `install-rhoai-35.sh`는 Kueue/RHCL/Authorino/Limitador/Service Mesh 3용
+  Subscription을 **컴포넌트별 전용 네임스페이스가 아니라
+  `openshift-operators`에 전부 모아서** 만듦 (처음에 추측했던
+  `redhat-ods-applications`/`redhat-ai-gateway-infra`/
+  `models-as-a-service`/`rhoai-model-registries`/`kuadrant-system`은
+  전부 틀림 — 저건 실제 워크로드가 떠 있는 네임스페이스고, Subscription
+  자체의 위치는 아님). `openshift-operators`는 `dns-operator` 같은 핵심
+  클러스터 오퍼레이터와 **공유**하는 네임스페이스라서, 그 안의 Subscription을
+  통째로 스캔하지 않고 정확한 이름 목록(`OAI_SUBSCRIPTIONS`)으로만 골라
+  patch하도록 구현함.
+- **검증**: 네 가지 문제 전부 고친 뒤 `node-placement`를 재실행해서 전부
+  "no change"(멱등 확인), `oc get pods -A`로 전체 클러스터에 `Pending` pod
+  0개 확인.
