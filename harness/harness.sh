@@ -291,7 +291,7 @@ cmd_node_pools() {
 
 cmd_node_placement() {
   ssh_bastion "MONITORING_NAMESPACE='$MONITORING_NAMESPACE' LOGGING_NAMESPACE='${LOGGING_NAMESPACE:-openshift-logging}' \
-    OAI_NAMESPACES='${OAI_NAMESPACES:-}' bash -s" < ./remote/node-placement.sh
+    NODE_POOL_AZ='$NODE_POOL_AZ' OAI_SUBSCRIPTIONS='${OAI_SUBSCRIPTIONS:-}' bash -s" < ./remote/node-placement.sh
 }
 
 cmd_neuron_machineset() {
